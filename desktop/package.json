@@ -1,0 +1,37 @@
+{
+  "name": "codex-modoki-desktop",
+  "version": "0.1.0",
+  "description": "codex_modoki Electron Desktop App",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.codex-modoki.desktop",
+    "productName": "codex_modoki",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "extraResources": [
+      {
+        "from": "../agent.py",
+        "to": "agent.py"
+      }
+    ]
+  }
+}

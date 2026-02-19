@@ -1,0 +1,336 @@
+// ── State ──────────────────────────────────────────────────────
+const state = {
+  isConnected: false,
+  isBusy: false,
+  autoConfirm: false,
+  currentAssistantEl: null,
+};
+
+// ── DOM refs ───────────────────────────────────────────────────
+const messagesEl   = document.getElementById('messages');
+const inputEl      = document.getElementById('user-input');
+const sendBtn      = document.getElementById('send-btn');
+const statusConn   = document.getElementById('status-conn');
+const statusModel  = document.getElementById('status-model');
+const statusCwd    = document.getElementById('status-cwd');
+const btnClear     = document.getElementById('btn-clear');
+const btnCompact   = document.getElementById('btn-compact');
+const btnAutoconf  = document.getElementById('btn-autoconfirm');
+
+// ── Tool card queue (FIFO for matching tool_call -> tool_result) ──
+const pendingToolCards = [];
+
+// ── Message rendering ──────────────────────────────────────────
+
+function appendUserMessage(content) {
+  const group = document.createElement('div');
+  group.className = 'message-group message-user';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = content;
+  group.appendChild(bubble);
+  messagesEl.appendChild(group);
+  scrollToBottom();
+}
+
+function startAssistantMessage() {
+  const group = document.createElement('div');
+  group.className = 'message-group message-assistant';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble streaming-cursor';
+  group.appendChild(bubble);
+  messagesEl.appendChild(group);
+  state.currentAssistantEl = bubble;
+  scrollToBottom();
+  return bubble;
+}
+
+function appendToken(content) {
+  if (!state.currentAssistantEl) {
+    startAssistantMessage();
+  }
+  state.currentAssistantEl.textContent += content;
+  scrollToBottom();
+}
+
+function finalizeAssistantMessage() {
+  if (state.currentAssistantEl) {
+    state.currentAssistantEl.classList.remove('streaming-cursor');
+    state.currentAssistantEl = null;
+  }
+}
+
+function appendToolCall(name, args) {
+  // Finalize any in-progress assistant text before showing tool card
+  finalizeAssistantMessage();
+
+  const argsStr = JSON.stringify(args, null, 2);
+  const card = document.createElement('div');
+  card.className = 'tool-card';
+  card.dataset.toolName = name;
+
+  card.innerHTML =
+    '<div class="tool-card-header">' +
+      '<span class="icon">&#9889;</span>' +
+      '<span>' + escHtml(name) + '</span>' +
+    '</div>' +
+    '<div class="tool-card-args">' +
+      escHtml(argsStr.length > 300 ? argsStr.slice(0, 300) + '...' : argsStr) +
+    '</div>';
+
+  messagesEl.appendChild(card);
+  pendingToolCards.push(card);
+  scrollToBottom();
+  return card;
+}
+
+function appendToolResult(name, result, status) {
+  const idx = pendingToolCards.findIndex(c => c.dataset.toolName === name);
+  const card = idx >= 0 ? pendingToolCards.splice(idx, 1)[0] : null;
+
+  if (card) {
+    card.classList.add('result-' + status);
+    const icon = status === 'ok' ? '\u2713' : status === 'error' ? '\u2717' : '\u2013';
+    const headerEl = card.querySelector('.tool-card-header');
+    headerEl.innerHTML =
+      '<span class="icon">' + icon + '</span>' +
+      '<span>' + escHtml(name) + '</span>' +
+      '<span style="margin-left:auto;color:var(--text-dim);font-size:10px">' +
+        escHtml(status) +
+      '</span>';
+
+    const argsEl = card.querySelector('.tool-card-args');
+    const preview = result.length > 150 ? result.slice(0, 150) + '...' : result;
+    if (argsEl) argsEl.textContent = preview;
+  }
+}
+
+function appendConfirmCard(id, toolName, args, preview) {
+  // Finalize any in-progress assistant text
+  finalizeAssistantMessage();
+
+  const card = document.createElement('div');
+  card.className = 'confirm-card';
+  card.dataset.confirmId = id;
+
+  const argsStr = JSON.stringify(args, null, 2);
+  const argsDisplay = argsStr.length > 200 ? argsStr.slice(0, 200) + '...' : argsStr;
+
+  let html =
+    '<div class="confirm-card-title">&#9888; 確認が必要な操作</div>' +
+    '<div class="confirm-card-tool">' + escHtml(toolName) + '</div>' +
+    '<div class="confirm-card-detail">' + escHtml(argsDisplay) + '</div>';
+
+  if (preview) {
+    html += '<div class="confirm-card-preview">' + renderDiffPreview(preview) + '</div>';
+  }
+
+  html +=
+    '<div class="confirm-buttons">' +
+      '<button class="confirm-btn confirm-btn-approve">承認</button>' +
+      '<button class="confirm-btn confirm-btn-cancel">キャンセル</button>' +
+    '</div>';
+
+  card.innerHTML = html;
+
+  // Wire up buttons
+  card.querySelector('.confirm-btn-approve').addEventListener('click', () => {
+    resolveConfirm(card, id, true);
+  });
+  card.querySelector('.confirm-btn-cancel').addEventListener('click', () => {
+    resolveConfirm(card, id, false);
+  });
+
+  messagesEl.appendChild(card);
+  scrollToBottom();
+}
+
+function resolveConfirm(card, id, approved) {
+  card.querySelectorAll('.confirm-btn').forEach(b => { b.disabled = true; });
+  const label = approved ? '承認済み' : 'キャンセル済み';
+  const color = approved ? 'var(--accent-green)' : 'var(--text-dim)';
+  card.querySelector('.confirm-buttons').innerHTML =
+    '<span style="font-size:12px;color:' + color + '">' + label + '</span>';
+
+  window.agent.sendConfirm(id, approved);
+}
+
+function renderDiffPreview(text) {
+  if (!text) return '';
+  return text.split('\n').map(line => {
+    if (line.startsWith('+') && !line.startsWith('+++'))
+      return '<span class="diff-add">' + escHtml(line) + '</span>';
+    if (line.startsWith('-') && !line.startsWith('---'))
+      return '<span class="diff-del">' + escHtml(line) + '</span>';
+    if (line.startsWith('@@'))
+      return '<span class="diff-hunk">' + escHtml(line) + '</span>';
+    return escHtml(line);
+  }).join('\n');
+}
+
+function appendStatusMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'status-message';
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollToBottom();
+}
+
+function appendErrorMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'error-message';
+  el.textContent = text;
+  messagesEl.appendChild(el);
+  scrollToBottom();
+}
+
+// ── Incoming message handler ───────────────────────────────────
+
+window.agent.onMessage((msg) => {
+  switch (msg.type) {
+
+    case 'system_info':
+      statusModel.textContent = 'model: ' + msg.model;
+      statusCwd.textContent = 'cwd: ' + msg.cwd;
+      statusConn.textContent = '接続済み';
+      statusConn.className = 'status-ready';
+      state.isConnected = true;
+      enableInput();
+      if (msg.has_context) {
+        appendStatusMessage('プロジェクトコンテキスト読み込み済み');
+      }
+      break;
+
+    case 'status':
+      appendStatusMessage(msg.message);
+      break;
+
+    case 'token':
+      appendToken(msg.content);
+      setStatus('busy');
+      break;
+
+    case 'tool_call':
+      appendToolCall(msg.name, msg.args);
+      setStatus('busy');
+      break;
+
+    case 'confirm_request':
+      appendConfirmCard(msg.id, msg.tool, msg.args, msg.preview);
+      break;
+
+    case 'tool_result':
+      appendToolResult(msg.name, msg.result, msg.status);
+      break;
+
+    case 'assistant_done':
+      finalizeAssistantMessage();
+      setStatus('ready');
+      setBusy(false);
+      break;
+
+    case 'error':
+      finalizeAssistantMessage();
+      appendErrorMessage(msg.message);
+      setStatus('error');
+      setBusy(false);
+      break;
+  }
+});
+
+// ── Sending messages ───────────────────────────────────────────
+
+function sendMessage() {
+  const content = inputEl.value.trim();
+  if (!content || state.isBusy || !state.isConnected) return;
+
+  appendUserMessage(content);
+  inputEl.value = '';
+  autoResizeInput();
+
+  setBusy(true);
+  setStatus('busy');
+
+  window.agent.sendMessage(content);
+}
+
+// ── Input handling ─────────────────────────────────────────────
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+inputEl.addEventListener('input', autoResizeInput);
+sendBtn.addEventListener('click', sendMessage);
+
+function autoResizeInput() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+}
+
+// ── Sidebar buttons ────────────────────────────────────────────
+
+btnClear.addEventListener('click', () => {
+  messagesEl.innerHTML = '';
+  pendingToolCards.length = 0;
+  state.currentAssistantEl = null;
+  window.agent.sendCommand('clear');
+});
+
+btnCompact.addEventListener('click', () => {
+  window.agent.sendCommand('compact');
+});
+
+btnAutoconf.addEventListener('click', () => {
+  state.autoConfirm = !state.autoConfirm;
+  btnAutoconf.textContent = '自動確認: ' + (state.autoConfirm ? 'ON' : 'OFF');
+  btnAutoconf.style.color = state.autoConfirm
+    ? 'var(--accent-red)' : 'var(--text-secondary)';
+  window.agent.sendCommand('autoconfirm');
+});
+
+// ── Utilities ──────────────────────────────────────────────────
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function scrollToBottom() {
+  const container = document.getElementById('chat-container');
+  requestAnimationFrame(() => {
+    container.scrollTop = container.scrollHeight;
+  });
+}
+
+function enableInput() {
+  inputEl.disabled = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+}
+
+function setBusy(busy) {
+  state.isBusy = busy;
+  inputEl.disabled = busy;
+  sendBtn.disabled = busy;
+  if (!busy) {
+    inputEl.focus();
+  }
+}
+
+function setStatus(s) {
+  const labels = {
+    connecting: '接続中...',
+    ready: '準備完了',
+    busy: '処理中...',
+    error: 'エラー',
+  };
+  statusConn.textContent = labels[s] || s;
+  statusConn.className = 'status-' + s;
+}

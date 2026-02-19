@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+  <title>codex_modoki</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <div id="sidebar">
+      <div id="logo">codex_modoki</div>
+      <div id="sidebar-actions">
+        <button id="btn-clear" class="sidebar-btn">会話クリア</button>
+        <button id="btn-compact" class="sidebar-btn">コンパクト</button>
+        <button id="btn-autoconfirm" class="sidebar-btn">自動確認: OFF</button>
+      </div>
+    </div>
+
+    <div id="main">
+      <div id="status-bar">
+        <span id="status-model">model: --</span>
+        <span id="status-cwd">cwd: --</span>
+        <span id="status-conn" class="status-connecting">接続中...</span>
+      </div>
+
+      <div id="chat-container">
+        <div id="messages"></div>
+      </div>
+
+      <div id="input-area">
+        <textarea id="user-input"
+          placeholder="メッセージを入力... (Enter で送信, Shift+Enter で改行)"
+          rows="1"
+          disabled></textarea>
+        <button id="send-btn" disabled>送信</button>
+      </div>
+    </div>
+  </div>
+  <script src="renderer.js"></script>
+</body>
+</html>
