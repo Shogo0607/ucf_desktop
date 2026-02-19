@@ -85,6 +85,75 @@ body {
   color: var(--text-primary);
 }
 
+/* ── Skills sidebar ───────────────────────────────────────── */
+#sidebar-skills {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  flex: 1;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+}
+
+#skills-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.skills-reload-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.skills-reload-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+.skill-btn {
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.skill-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
+.skill-name {
+  color: var(--accent-blue);
+}
+.skill-source {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.skills-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 4px 10px;
+}
+
 /* ── Main area ─────────────────────────────────────────────── */
 #main {
   flex: 1;

@@ -16,6 +16,8 @@ const statusCwd    = document.getElementById('status-cwd');
 const btnClear     = document.getElementById('btn-clear');
 const btnCompact   = document.getElementById('btn-compact');
 const btnAutoconf  = document.getElementById('btn-autoconfirm');
+const skillsListEl = document.getElementById('skills-list');
+const btnSkillsReload = document.getElementById('btn-skills-reload');
 
 // ── Tool card queue (FIFO for matching tool_call -> tool_result) ──
 const pendingToolCards = [];
@@ -168,12 +170,19 @@ function renderDiffPreview(text) {
   }).join('\n');
 }
 
-function appendStatusMessage(text) {
+function appendStatusMessage(text, ephemeral) {
+  removeEphemeralStatus();
   const el = document.createElement('div');
   el.className = 'status-message';
   el.textContent = text;
+  if (ephemeral) el.dataset.ephemeral = '1';
   messagesEl.appendChild(el);
   scrollToBottom();
+}
+
+function removeEphemeralStatus() {
+  messagesEl.querySelectorAll('.status-message[data-ephemeral="1"]')
+    .forEach(el => el.remove());
 }
 
 function appendErrorMessage(text) {
@@ -199,18 +208,27 @@ window.agent.onMessage((msg) => {
       if (msg.has_context) {
         appendStatusMessage('プロジェクトコンテキスト読み込み済み');
       }
+      if (msg.skills && msg.skills.length > 0) {
+        renderSkillsList(msg.skills);
+      }
+      break;
+
+    case 'skills_list':
+      renderSkillsList(msg.skills);
       break;
 
     case 'status':
-      appendStatusMessage(msg.message);
+      appendStatusMessage(msg.message, msg.ephemeral);
       break;
 
     case 'token':
+      removeEphemeralStatus();
       appendToken(msg.content);
       setStatus('busy');
       break;
 
     case 'tool_call':
+      removeEphemeralStatus();
       appendToolCall(msg.name, msg.args);
       setStatus('busy');
       break;
@@ -224,9 +242,19 @@ window.agent.onMessage((msg) => {
       break;
 
     case 'assistant_done':
+      removeEphemeralStatus();
       finalizeAssistantMessage();
       setStatus('ready');
       setBusy(false);
+      break;
+
+    case 'chat_finished':
+      removeEphemeralStatus();
+      finalizeAssistantMessage();
+      if (state.isBusy) {
+        setStatus('ready');
+        setBusy(false);
+      }
       break;
 
     case 'error':
@@ -291,6 +319,36 @@ btnAutoconf.addEventListener('click', () => {
     ? 'var(--accent-red)' : 'var(--text-secondary)';
   window.agent.sendCommand('autoconfirm');
 });
+
+// ── Skills ──────────────────────────────────────────────────────
+
+btnSkillsReload.addEventListener('click', () => {
+  window.agent.sendCommand('skills_reload');
+});
+
+function renderSkillsList(skills) {
+  skillsListEl.innerHTML = '';
+  if (!skills || skills.length === 0) {
+    skillsListEl.innerHTML = '<div class="skills-empty">スキルなし</div>';
+    return;
+  }
+  skills.forEach(skill => {
+    const btn = document.createElement('button');
+    btn.className = 'skill-btn';
+    btn.title = skill.description;
+    btn.innerHTML =
+      '<span class="skill-name">' + escHtml(skill.name) + '</span>' +
+      '<span class="skill-source">' + escHtml(skill.source) + '</span>';
+    btn.addEventListener('click', () => {
+      if (state.isBusy) return;
+      setBusy(true);
+      setStatus('busy');
+      appendStatusMessage('スキル実行: ' + skill.name);
+      window.agent.sendCommand('run_skill', skill.name);
+    });
+    skillsListEl.appendChild(btn);
+  });
+}
 
 // ── Utilities ──────────────────────────────────────────────────
 

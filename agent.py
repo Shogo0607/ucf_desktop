@@ -3,6 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "openai",
+#     "python-dotenv",
 # ]
 # ///
 """
@@ -36,7 +37,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
 from openai import OpenAI
+
+# .env ファイルから環境変数を読み込む（既存の環境変数は上書きしない）
+load_dotenv()
 
 # ─────────────────────────────────────────────
 # カラー出力
@@ -96,7 +101,7 @@ class Spinner:
 
     def start(self) -> None:
         if _GUI_MODE:
-            _emit({"type": "status", "message": self._message})
+            _emit({"type": "status", "message": self._message, "ephemeral": True})
             return
         if _NO_COLOR or not sys.stdout.isatty():
             return
@@ -320,10 +325,115 @@ def _build_system_prompt(config: dict, project_context: str = "") -> str:
   - ファイル操作やネットワーク通信が必要な場合は `run_command` ツールを使ってください。
   - 何かうまくいかなかった場合の原因調査やデータ分析に積極的に活用してください。
 """
+    # スキル一覧をシステムプロンプトに追加
+    skills = _skill_registry.list_skills()
+    if skills:
+        prompt += "\n## 利用可能なスキル\n"
+        prompt += "以下のスキルが利用可能です。適切な場面では run_skill ツールを使って実行してください。\n\n"
+        for s in skills:
+            prompt += f"- **{s.name}**: {s.description}\n"
+        prompt += "\n"
+
     if project_context:
         prompt += f"\n{project_context}\n"
 
     return prompt
+
+
+# ─────────────────────────────────────────────
+# Agent Skills
+# ─────────────────────────────────────────────
+
+
+class SkillInfo:
+    __slots__ = ("name", "description", "path", "source")
+
+    def __init__(self, name: str, description: str, path: Path, source: str):
+        self.name = name
+        self.description = description
+        self.path = path
+        self.source = source
+
+
+def _parse_skill_md(path: Path) -> Optional[dict]:
+    """SKILL.md をパースし、name/description/body を返す。"""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+    if not text.startswith("---"):
+        return None
+    end = text.find("---", 3)
+    if end < 0:
+        return None
+
+    frontmatter = text[3:end].strip()
+    body = text[end + 3:].strip()
+
+    meta: dict = {}
+    for line in frontmatter.splitlines():
+        if ":" in line:
+            key, _, val = line.partition(":")
+            meta[key.strip()] = val.strip()
+
+    name = meta.get("name")
+    description = meta.get("description", "")
+    if not name:
+        return None
+
+    return {"name": name, "description": description, "body": body}
+
+
+class SkillRegistry:
+    """スキルの発見・管理を行うレジストリ。"""
+
+    def __init__(self) -> None:
+        self._skills: dict[str, SkillInfo] = {}
+
+    def scan(self) -> None:
+        new_skills: dict[str, SkillInfo] = {}
+        locations = [
+            ("global", Path.home() / ".codex_modoki" / "skills"),
+            ("project", Path.cwd() / "skills"),
+        ]
+        for source, base_dir in locations:
+            if not base_dir.is_dir():
+                continue
+            for skill_dir in sorted(base_dir.iterdir()):
+                if not skill_dir.is_dir():
+                    continue
+                skill_md = skill_dir / "SKILL.md"
+                if not skill_md.is_file():
+                    continue
+                parsed = _parse_skill_md(skill_md)
+                if parsed is None:
+                    continue
+                new_skills[parsed["name"]] = SkillInfo(
+                    name=parsed["name"],
+                    description=parsed["description"],
+                    path=skill_md,
+                    source=source,
+                )
+        self._skills = new_skills
+
+    def list_skills(self) -> list[SkillInfo]:
+        return list(self._skills.values())
+
+    def get_skill(self, name: str) -> Optional[SkillInfo]:
+        return self._skills.get(name)
+
+    def load_instructions(self, name: str) -> str:
+        skill = self._skills.get(name)
+        if skill is None:
+            return ""
+        parsed = _parse_skill_md(skill.path)
+        if parsed is None:
+            return ""
+        return parsed["body"]
+
+
+_skill_registry = SkillRegistry()
 
 
 # ─────────────────────────────────────────────
@@ -550,6 +660,28 @@ TOOLS = [
                     },
                 },
                 "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill",
+            "description": "登録済みのスキルを実行する。スキルの指示をロードして会話コンテキストに注入し、"
+            "その指示に従って作業を続行する。利用可能なスキルはシステムプロンプトに記載されている。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "実行するスキル名",
+                    },
+                    "arguments": {
+                        "type": "string",
+                        "description": "スキルに渡す追加引数やコンテキスト（任意）",
+                    },
+                },
+                "required": ["name"],
             },
         },
     },
@@ -929,6 +1061,26 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} PB"
 
 
+def tool_run_skill(name: str, arguments: str = "") -> str:
+    """スキルの指示をロードしてツール結果として返す。"""
+    skill = _skill_registry.get_skill(name)
+    if skill is None:
+        available = ", ".join(s.name for s in _skill_registry.list_skills())
+        return f"[error] スキル '{name}' が見つかりません。利用可能: {available or 'なし'}"
+
+    instructions = _skill_registry.load_instructions(name)
+    if not instructions:
+        return f"[error] スキル '{name}' の読み込みに失敗しました"
+
+    result = f"[skill:{name}] 以下のスキル指示に従って作業してください。\n\n{instructions}"
+    if arguments:
+        result += f"\n\n## ユーザーからの追加指示\n{arguments}"
+    # 指示が長すぎる場合は切り詰め
+    if len(result) > 10000:
+        result = result[:10000] + "\n\n[...指示が長すぎるため切り詰めました]"
+    return result
+
+
 # ─────────────────────────────────────────────
 # ツールディスパッチ
 # ─────────────────────────────────────────────
@@ -943,6 +1095,7 @@ TOOL_FUNCTIONS = {
     "grep": tool_grep,
     "get_file_info": tool_get_file_info,
     "run_python_sandbox": tool_run_python_sandbox,
+    "run_skill": tool_run_skill,
 }
 
 DESTRUCTIVE_TOOLS = {"run_command", "write_file", "edit_file"}
@@ -1676,6 +1829,65 @@ def cmd_image(messages: list, client: OpenAI, config: dict, state: dict, args: s
         messages.pop()
 
 
+@slash_command("skills", "利用可能なスキル一覧を表示 (/skills reload で再読み込み)")
+def cmd_skills(args: str = "", **_) -> None:
+    if args.strip() == "reload":
+        _skill_registry.scan()
+        count = len(_skill_registry.list_skills())
+        print(_green(f"  スキルを再読み込みしました: {count} 個"))
+        return
+    skills = _skill_registry.list_skills()
+    if not skills:
+        print(_dim("  スキルが見つかりません"))
+        print(_dim(f"  グローバル: ~/.codex_modoki/skills/<name>/SKILL.md"))
+        print(_dim(f"  プロジェクト: ./skills/<name>/SKILL.md"))
+        return
+    print(f"\n{_bold('利用可能なスキル:')}\n")
+    for s in skills:
+        source_tag = _dim(f"[{s.source}]")
+        print(f"  {_cyan(s.name):30s} {s.description} {source_tag}")
+    print(f"\n  {_dim('使い方: /skill <name> [arguments]')}")
+    print(f"  {_dim('リロード: /skills reload')}")
+
+
+@slash_command("skill", "スキルを実行する (例: /skill commit-message)")
+def cmd_skill(messages: list, client: OpenAI, config: dict, state: dict, args: str = "", **_) -> None:
+    if not args:
+        print(_red("  使い方: /skill <name> [arguments]"))
+        print(_dim("  /skills で一覧表示"))
+        return
+
+    parts = args.strip().split(None, 1)
+    skill_name = parts[0]
+    skill_args = parts[1] if len(parts) > 1 else ""
+
+    skill = _skill_registry.get_skill(skill_name)
+    if skill is None:
+        print(_red(f"  スキル '{skill_name}' が見つかりません"))
+        print(_dim("  /skills で一覧表示"))
+        return
+
+    instructions = _skill_registry.load_instructions(skill_name)
+    if not instructions:
+        print(_red(f"  スキル '{skill_name}' の読み込みに失敗しました"))
+        return
+
+    content = f"[スキル実行: {skill_name}]\n\n{instructions}"
+    if skill_args:
+        content += f"\n\n## 追加指示\n{skill_args}"
+
+    messages.append({"role": "user", "content": content})
+    print(f"  {_cyan('🔧')} スキル '{skill_name}' を実行中...")
+
+    try:
+        chat(client, messages, config, auto_confirm=state.get("auto_confirm", False))
+    except KeyboardInterrupt:
+        print(_yellow("\n  中断しました。"))
+    except Exception as e:
+        print(f"\n{_red('[API error]')} {e}")
+        messages.pop()
+
+
 # ─────────────────────────────────────────────
 # 複数行入力
 # ─────────────────────────────────────────────
@@ -1723,6 +1935,9 @@ def gui_main():
     _ACTIVE_CONFIG = config
     state = {"auto_confirm": config.get("auto_confirm", False)}
 
+    # スキルのスキャン
+    _skill_registry.scan()
+
     # 初回自動コンテキスト収集
     project_context = ""
     if config.get("auto_context", True):
@@ -1744,6 +1959,10 @@ def gui_main():
         "cwd": os.getcwd(),
         "os": platform.system(),
         "has_context": bool(project_context),
+        "skills": [
+            {"name": s.name, "description": s.description, "source": s.source}
+            for s in _skill_registry.list_skills()
+        ],
     })
 
     # stdin 読み取りループ（メインスレッド）
@@ -1786,6 +2005,7 @@ def gui_main():
                         msgs.pop()
                 finally:
                     _chat_in_progress.clear()
+                    _emit({"type": "chat_finished"})
 
             t = threading.Thread(target=_run_chat, daemon=True)
             t.start()
@@ -1811,6 +2031,61 @@ def gui_main():
             elif cmd_name == "model" and cmd_args:
                 config["model"] = cmd_args
                 _emit({"type": "status", "message": f"モデル変更: {cmd_args}"})
+            elif cmd_name == "skills":
+                skills = _skill_registry.list_skills()
+                _emit({
+                    "type": "skills_list",
+                    "skills": [
+                        {"name": s.name, "description": s.description, "source": s.source}
+                        for s in skills
+                    ],
+                })
+            elif cmd_name == "skills_reload":
+                _skill_registry.scan()
+                skills = _skill_registry.list_skills()
+                _emit({
+                    "type": "skills_list",
+                    "skills": [
+                        {"name": s.name, "description": s.description, "source": s.source}
+                        for s in skills
+                    ],
+                })
+                _emit({"type": "status",
+                       "message": f"スキルを再読み込みしました: {len(skills)} 個"})
+            elif cmd_name == "run_skill" and cmd_args:
+                parts = cmd_args.strip().split(None, 1)
+                skill_name = parts[0]
+                skill_extra = parts[1] if len(parts) > 1 else ""
+                skill = _skill_registry.get_skill(skill_name)
+                if skill is None:
+                    _emit({"type": "error",
+                           "message": f"スキル '{skill_name}' が見つかりません"})
+                elif _chat_in_progress.is_set():
+                    _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
+                else:
+                    instructions = _skill_registry.load_instructions(skill_name)
+                    if not instructions:
+                        _emit({"type": "error",
+                               "message": f"スキル '{skill_name}' の読み込みに失敗しました"})
+                    else:
+                        content = f"[スキル実行: {skill_name}]\n\n{instructions}"
+                        if skill_extra:
+                            content += f"\n\n## 追加指示\n{skill_extra}"
+                        messages.append({"role": "user", "content": content})
+                        _chat_in_progress.set()
+
+                        def _run_skill_chat(msgs=messages):
+                            try:
+                                chat(client, msgs, config,
+                                     auto_confirm=state.get("auto_confirm", False))
+                            except Exception as e:
+                                _emit({"type": "error", "message": str(e)})
+                            finally:
+                                _chat_in_progress.clear()
+                                _emit({"type": "chat_finished"})
+
+                        t = threading.Thread(target=_run_skill_chat, daemon=True)
+                        t.start()
 
 
 # ─────────────────────────────────────────────
@@ -1848,6 +2123,10 @@ def main():
 
     state = {"auto_confirm": config.get("auto_confirm", False)}
 
+    # スキルのスキャン
+    _skill_registry.scan()
+    skill_count = len(_skill_registry.list_skills())
+
     # 初回自動コンテキスト収集
     project_context = ""
     if config.get("auto_context", True):
@@ -1872,6 +2151,8 @@ def main():
         print(f"  Base URL: {base_url}")
     if project_context:
         print(f"  {_green('✓')} プロジェクトコンテキスト読み込み済み")
+    if skill_count > 0:
+        print(f"  {_green('✓')} スキル: {skill_count} 個読み込み済み (/skills で一覧)")
     print(f"  {_dim('/help でコマンド一覧 | quit で終了')}")
     print("=" * 60)
 
