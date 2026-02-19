@@ -1,7 +1,7 @@
 {
-  "name": "codex-modoki-desktop",
+  "name": "ucf-desktop",
   "version": "0.1.0",
-  "description": "codex_modoki Electron Desktop App",
+  "description": "ucf_desktop Electron Desktop App",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -13,8 +13,8 @@
     "electron-builder": "^25.0.0"
   },
   "build": {
-    "appId": "com.codex-modoki.desktop",
-    "productName": "codex_modoki",
+    "appId": "com.ucf-desktop.app",
+    "productName": "ucf_desktop",
     "files": [
       "main.js",
       "preload.js",

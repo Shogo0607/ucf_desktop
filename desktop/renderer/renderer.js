@@ -4,6 +4,7 @@ const state = {
   isBusy: false,
   autoConfirm: false,
   currentAssistantEl: null,
+  disabledSkills: new Set(),
 };
 
 // ── DOM refs ───────────────────────────────────────────────────
@@ -14,7 +15,6 @@ const statusConn   = document.getElementById('status-conn');
 const statusModel  = document.getElementById('status-model');
 const statusCwd    = document.getElementById('status-cwd');
 const btnClear     = document.getElementById('btn-clear');
-const btnCompact   = document.getElementById('btn-compact');
 const btnAutoconf  = document.getElementById('btn-autoconfirm');
 const skillsListEl = document.getElementById('skills-list');
 const btnSkillsReload = document.getElementById('btn-skills-reload');
@@ -204,6 +204,9 @@ window.agent.onMessage((msg) => {
       statusConn.textContent = '接続済み';
       statusConn.className = 'status-ready';
       state.isConnected = true;
+      if (msg.disabled_skills) {
+        state.disabledSkills = new Set(msg.disabled_skills);
+      }
       enableInput();
       if (msg.has_context) {
         appendStatusMessage('プロジェクトコンテキスト読み込み済み');
@@ -215,6 +218,15 @@ window.agent.onMessage((msg) => {
 
     case 'skills_list':
       renderSkillsList(msg.skills);
+      break;
+
+    case 'skill_toggled':
+      if (msg.enabled) {
+        state.disabledSkills.delete(msg.name);
+      } else {
+        state.disabledSkills.add(msg.name);
+      }
+      updateSkillToggleUI(msg.name, msg.enabled);
       break;
 
     case 'status':
@@ -257,8 +269,18 @@ window.agent.onMessage((msg) => {
       }
       break;
 
+    case 'compacting':
+      showCompactingSpinner();
+      break;
+
+    case 'compact_done':
+      hideCompactingSpinner();
+      appendStatusMessage(msg.message || '会話を自動圧縮しました');
+      break;
+
     case 'error':
       finalizeAssistantMessage();
+      hideCompactingSpinner();
       appendErrorMessage(msg.message);
       setStatus('error');
       setBusy(false);
@@ -308,10 +330,6 @@ btnClear.addEventListener('click', () => {
   window.agent.sendCommand('clear');
 });
 
-btnCompact.addEventListener('click', () => {
-  window.agent.sendCommand('compact');
-});
-
 btnAutoconf.addEventListener('click', () => {
   state.autoConfirm = !state.autoConfirm;
   btnAutoconf.textContent = '自動確認: ' + (state.autoConfirm ? 'ON' : 'OFF');
@@ -333,21 +351,80 @@ function renderSkillsList(skills) {
     return;
   }
   skills.forEach(skill => {
+    const isDisabled = state.disabledSkills.has(skill.name);
+
+    const row = document.createElement('div');
+    row.className = 'skill-row' + (isDisabled ? ' skill-disabled' : '');
+    row.dataset.skillName = skill.name;
+
+    // スキル実行ボタン
     const btn = document.createElement('button');
     btn.className = 'skill-btn';
     btn.title = skill.description;
+    let badges = '';
+    if (skill.has_scripts) badges += ' <span class="skill-badge">S</span>';
+    if (skill.has_references) badges += ' <span class="skill-badge">R</span>';
+    if (skill.has_assets) badges += ' <span class="skill-badge">A</span>';
     btn.innerHTML =
-      '<span class="skill-name">' + escHtml(skill.name) + '</span>' +
-      '<span class="skill-source">' + escHtml(skill.source) + '</span>';
+      '<span class="skill-name">' + escHtml(skill.name) + badges + '</span>';
     btn.addEventListener('click', () => {
-      if (state.isBusy) return;
+      if (state.isBusy || isDisabled) return;
       setBusy(true);
       setStatus('busy');
       appendStatusMessage('スキル実行: ' + skill.name);
       window.agent.sendCommand('run_skill', skill.name);
     });
-    skillsListEl.appendChild(btn);
+
+    // トグルスイッチ
+    const toggle = document.createElement('label');
+    toggle.className = 'skill-toggle';
+    toggle.title = isDisabled ? '有効にする' : '無効にする';
+    toggle.innerHTML =
+      '<input type="checkbox"' + (isDisabled ? '' : ' checked') + '>' +
+      '<span class="skill-toggle-slider"></span>';
+    toggle.querySelector('input').addEventListener('change', (e) => {
+      e.stopPropagation();
+      window.agent.sendCommand('toggle_skill', skill.name);
+    });
+
+    row.appendChild(btn);
+    row.appendChild(toggle);
+    skillsListEl.appendChild(row);
   });
+}
+
+function updateSkillToggleUI(skillName, enabled) {
+  const row = skillsListEl.querySelector('.skill-row[data-skill-name="' + skillName + '"]');
+  if (!row) return;
+  if (enabled) {
+    row.classList.remove('skill-disabled');
+  } else {
+    row.classList.add('skill-disabled');
+  }
+  const checkbox = row.querySelector('.skill-toggle input');
+  if (checkbox) checkbox.checked = enabled;
+  const toggleLabel = row.querySelector('.skill-toggle');
+  if (toggleLabel) toggleLabel.title = enabled ? '無効にする' : '有効にする';
+}
+
+// ── Compacting spinner ──────────────────────────────────────────
+
+function showCompactingSpinner() {
+  if (document.getElementById('compacting-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'compacting-overlay';
+  overlay.innerHTML =
+    '<div class="compacting-spinner-box">' +
+      '<div class="compacting-spinner"></div>' +
+      '<div class="compacting-label">会話を圧縮中...</div>' +
+    '</div>';
+  document.getElementById('chat-container').appendChild(overlay);
+  scrollToBottom();
+}
+
+function hideCompactingSpinner() {
+  const overlay = document.getElementById('compacting-overlay');
+  if (overlay) overlay.remove();
 }
 
 // ── Utilities ──────────────────────────────────────────────────
@@ -392,3 +469,4 @@ function setStatus(s) {
   statusConn.textContent = labels[s] || s;
   statusConn.className = 'status-' + s;
 }
+

@@ -7,7 +7,7 @@
 # ]
 # ///
 """
-codex_modoki - ローカルファイル操作AIエージェント
+ucf_desktop - ローカルファイル操作AIエージェント
 Claude Code / Codex 風の対話型エージェント。
 OpenAI gpt-4.1-mini の function calling を使い、
 ファイル読み書き・ディレクトリ操作・コマンド実行を自然言語で行う。
@@ -165,7 +165,7 @@ def _emit(obj: dict) -> None:
 # 設定ファイル
 # ─────────────────────────────────────────────
 
-_CONFIG_DIR = Path.home() / ".codex_modoki"
+_CONFIG_DIR = Path.home() / ".ucf_desktop"
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
@@ -291,7 +291,7 @@ def _collect_project_context(max_files: int = 50) -> str:
 # ─────────────────────────────────────────────
 
 
-def _build_system_prompt(config: dict, project_context: str = "") -> str:
+def _build_system_prompt(config: dict, project_context: str = "", disabled_skills: set[str] | None = None) -> str:
     prompt = f"""\
 あなたはローカルマシン上で動作する万能アシスタントエージェントです。
 ユーザーの指示に従い、提供されたツールを使ってファイルの読み書き、
@@ -331,13 +331,26 @@ def _build_system_prompt(config: dict, project_context: str = "") -> str:
   - ファイル操作やネットワーク通信が必要な場合は `run_command` ツールを使ってください。
   - 何かうまくいかなかった場合の原因調査やデータ分析に積極的に活用してください。
 """
-    # スキル一覧をシステムプロンプトに追加
-    skills = _skill_registry.list_skills()
+    # スキル一覧をシステムプロンプトに追加（有効なスキルのみ）
+    skills = _skill_registry.list_enabled_skills(disabled_skills)
     if skills:
-        prompt += "\n## 利用可能なスキル\n"
-        prompt += "以下のスキルが利用可能です。適切な場面では run_skill ツールを使って実行してください。\n\n"
+        prompt += "\n## 利用可能なスキル（最優先で確認すること）\n"
+        prompt += (
+            "**重要**: ユーザーのリクエストを受け取ったら、まず以下のスキル一覧の description を確認し、"
+            "合致するスキルがあれば **必ず最初に `run_skill` ツールで実行する**こと。"
+            "スキルが存在するタスクでは、自分で直接ツールを呼び出す前にスキルを使うこと。"
+            "スキルにはそのタスクに最適化された手順・スクリプトが含まれている。\n\n"
+        )
         for s in skills:
-            prompt += f"- **{s.name}**: {s.description}\n"
+            tags = []
+            if s.scripts_dir:
+                tags.append("scripts")
+            if s.references_dir:
+                tags.append("references")
+            if s.assets_dir:
+                tags.append("assets")
+            tag_str = f" [{', '.join(tags)}]" if tags else ""
+            prompt += f"- **{s.name}**: {s.description}{tag_str}\n"
         prompt += "\n"
 
     if project_context:
@@ -352,13 +365,20 @@ def _build_system_prompt(config: dict, project_context: str = "") -> str:
 
 
 class SkillInfo:
-    __slots__ = ("name", "description", "path", "source")
+    __slots__ = ("name", "description", "path", "source",
+                 "scripts_dir", "references_dir", "assets_dir")
 
-    def __init__(self, name: str, description: str, path: Path, source: str):
+    def __init__(self, name: str, description: str, path: Path, source: str,
+                 scripts_dir: Optional[Path] = None,
+                 references_dir: Optional[Path] = None,
+                 assets_dir: Optional[Path] = None):
         self.name = name
         self.description = description
         self.path = path
         self.source = source
+        self.scripts_dir = scripts_dir
+        self.references_dir = references_dir
+        self.assets_dir = assets_dir
 
 
 def _parse_skill_md(path: Path) -> Optional[dict]:
@@ -400,7 +420,7 @@ class SkillRegistry:
     def scan(self) -> None:
         new_skills: dict[str, SkillInfo] = {}
         locations = [
-            ("global", Path.home() / ".codex_modoki" / "skills"),
+            ("global", Path.home() / ".ucf_desktop" / "skills"),
             ("project", Path.cwd() / "skills"),
         ]
         for source, base_dir in locations:
@@ -415,16 +435,28 @@ class SkillRegistry:
                 parsed = _parse_skill_md(skill_md)
                 if parsed is None:
                     continue
+                scripts_d = skill_dir / "scripts"
+                refs_d = skill_dir / "references"
+                assets_d = skill_dir / "assets"
                 new_skills[parsed["name"]] = SkillInfo(
                     name=parsed["name"],
                     description=parsed["description"],
                     path=skill_md,
                     source=source,
+                    scripts_dir=scripts_d if scripts_d.is_dir() else None,
+                    references_dir=refs_d if refs_d.is_dir() else None,
+                    assets_dir=assets_d if assets_d.is_dir() else None,
                 )
         self._skills = new_skills
 
     def list_skills(self) -> list[SkillInfo]:
         return list(self._skills.values())
+
+    def list_enabled_skills(self, disabled: set[str] | None = None) -> list[SkillInfo]:
+        """無効化されていないスキルのみ返す。"""
+        if not disabled:
+            return self.list_skills()
+        return [s for s in self._skills.values() if s.name not in disabled]
 
     def get_skill(self, name: str) -> Optional[SkillInfo]:
         return self._skills.get(name)
@@ -437,6 +469,17 @@ class SkillRegistry:
         if parsed is None:
             return ""
         return parsed["body"]
+
+    @staticmethod
+    def skill_to_dict(s: "SkillInfo") -> dict:
+        d = {"name": s.name, "description": s.description, "source": s.source}
+        if s.scripts_dir:
+            d["has_scripts"] = True
+        if s.references_dir:
+            d["has_references"] = True
+        if s.assets_dir:
+            d["has_assets"] = True
+        return d
 
 
 _skill_registry = SkillRegistry()
@@ -762,12 +805,37 @@ def tool_read_file(
         return f"[error] {e}"
 
 
+def _maybe_rescan_skills(resolved_path: str) -> None:
+    """skills/ 配下のファイルが変更された場合、レジストリを再スキャンする。"""
+    rp = Path(resolved_path)
+    skills_dirs = [
+        Path.home() / ".ucf_desktop" / "skills",
+        Path.cwd() / "skills",
+    ]
+    for sd in skills_dirs:
+        try:
+            if rp.is_relative_to(sd):
+                _skill_registry.scan()
+                if _GUI_MODE:
+                    _emit({
+                        "type": "skills_list",
+                        "skills": [
+                            _skill_registry.skill_to_dict(s)
+                            for s in _skill_registry.list_skills()
+                        ],
+                    })
+                break
+        except (ValueError, TypeError):
+            pass
+
+
 def tool_write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     resolved = _resolve_path(path)
     try:
         os.makedirs(os.path.dirname(resolved), exist_ok=True)
         with open(resolved, "w", encoding=encoding) as f:
             f.write(content)
+        _maybe_rescan_skills(resolved)
         return f"ファイルを書き込みました: {resolved} ({len(content)} chars)"
     except Exception as e:
         return f"[error] {e}"
@@ -793,6 +861,7 @@ def tool_edit_file(path: str, old_string: str, new_string: str) -> str:
     try:
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(new_content)
+        _maybe_rescan_skills(resolved)
         # diff を生成して返す
         diff_text = _generate_diff(content, new_content, resolved)
         return f"ファイルを編集しました: {resolved}\n{diff_text}"
@@ -1067,8 +1136,20 @@ def _human_size(size: int) -> str:
     return f"{size:.1f} PB"
 
 
+def _list_dir_files(d: Optional[Path]) -> list[str]:
+    """ディレクトリ内のファイル名リストを返す。"""
+    if d is None or not d.is_dir():
+        return []
+    return sorted(f.name for f in d.iterdir() if f.is_file())
+
+
 def tool_run_skill(name: str, arguments: str = "") -> str:
     """スキルの指示をロードしてツール結果として返す。"""
+    # 無効化されたスキルの実行をブロック
+    disabled = _ACTIVE_CONFIG.get("_disabled_skills", set())
+    if name in disabled:
+        return f"[error] スキル '{name}' は現在無効化されています。"
+
     skill = _skill_registry.get_skill(name)
     if skill is None:
         available = ", ".join(s.name for s in _skill_registry.list_skills())
@@ -1079,6 +1160,28 @@ def tool_run_skill(name: str, arguments: str = "") -> str:
         return f"[error] スキル '{name}' の読み込みに失敗しました"
 
     result = f"[skill:{name}] 以下のスキル指示に従って作業してください。\n\n{instructions}"
+
+    # バンドルリソース情報を追加
+    skill_dir = skill.path.parent
+    scripts = _list_dir_files(skill.scripts_dir)
+    references = _list_dir_files(skill.references_dir)
+    assets = _list_dir_files(skill.assets_dir)
+
+    if scripts or references or assets:
+        result += "\n\n## バンドルリソース\n"
+        if scripts:
+            result += "\n### scripts/ (run_command で実行可能)\n"
+            for s in scripts:
+                result += f"- `{skill_dir}/scripts/{s}`\n"
+        if references:
+            result += "\n### references/ (read_file で参照可能)\n"
+            for r in references:
+                result += f"- `{skill_dir}/references/{r}`\n"
+        if assets:
+            result += "\n### assets/ (テンプレートや出力素材)\n"
+            for a in assets:
+                result += f"- `{skill_dir}/assets/{a}`\n"
+
     if arguments:
         result += f"\n\n## ユーザーからの追加指示\n{arguments}"
     # 指示が長すぎる場合は切り詰め
@@ -1845,7 +1948,7 @@ def cmd_skills(args: str = "", **_) -> None:
     skills = _skill_registry.list_skills()
     if not skills:
         print(_dim("  スキルが見つかりません"))
-        print(_dim(f"  グローバル: ~/.codex_modoki/skills/<name>/SKILL.md"))
+        print(_dim(f"  グローバル: ~/.ucf_desktop/skills/<name>/SKILL.md"))
         print(_dim(f"  プロジェクト: ./skills/<name>/SKILL.md"))
         return
     print(f"\n{_bold('利用可能なスキル:')}\n")
@@ -1939,6 +2042,9 @@ def gui_main():
 
     config = _load_config()
     _ACTIVE_CONFIG = config
+    # disabled_skills は set で管理し、config にも保持（ツール側から参照）
+    disabled_skills: set[str] = set(config.get("disabled_skills", []))
+    config["_disabled_skills"] = disabled_skills
     state = {"auto_confirm": config.get("auto_confirm", False)}
 
     # スキルのスキャン
@@ -1955,8 +2061,13 @@ def gui_main():
         except Exception:
             pass
 
-    system_prompt = _build_system_prompt(config, project_context)
+    system_prompt = _build_system_prompt(config, project_context, disabled_skills)
     messages: list = [{"role": "system", "content": system_prompt}]
+
+    def _rebuild_system_prompt():
+        """disabled_skills 変更後にシステムプロンプトを再構築する。"""
+        new_prompt = _build_system_prompt(config, project_context, disabled_skills)
+        messages[0] = {"role": "system", "content": new_prompt}
 
     # 初期情報を Electron に送信
     _emit({
@@ -1965,8 +2076,9 @@ def gui_main():
         "cwd": os.getcwd(),
         "os": platform.system(),
         "has_context": bool(project_context),
+        "disabled_skills": list(disabled_skills),
         "skills": [
-            {"name": s.name, "description": s.description, "source": s.source}
+            _skill_registry.skill_to_dict(s)
             for s in _skill_registry.list_skills()
         ],
     })
@@ -1999,6 +2111,29 @@ def gui_main():
             messages_ref[:] = _auto_trim(messages_ref, config)
             messages_ref.append({"role": "user", "content": content})
 
+            # ── 自動圧縮: コンテキストが上限の80%を超えたら圧縮 ──
+            auto_compact_threshold = int(
+                config.get("context_limit", 128000)
+                * config.get("auto_compact_ratio", 0.8)
+            )
+            est_tokens = _estimate_tokens(messages_ref)
+            if est_tokens > auto_compact_threshold and len(messages_ref) > config.get("compact_keep_recent", 10) + 2:
+                _emit({"type": "compacting"})
+                try:
+                    new_msgs = _compact_messages(client, messages_ref, config)
+                    messages_ref.clear()
+                    messages_ref.extend(new_msgs)
+                    after_tokens = _estimate_tokens(messages_ref)
+                    _emit({
+                        "type": "compact_done",
+                        "message": f"会話を自動圧縮しました ({est_tokens:,} → {after_tokens:,} tokens)"
+                    })
+                except Exception as e:
+                    _emit({
+                        "type": "compact_done",
+                        "message": f"自動圧縮に失敗しました: {e}"
+                    })
+
             _chat_in_progress.set()
 
             def _run_chat(msgs=messages_ref):
@@ -2024,12 +2159,6 @@ def gui_main():
                 messages.clear()
                 messages.append(system_msg)
                 _emit({"type": "status", "message": "会話履歴をクリアしました"})
-            elif cmd_name == "compact":
-                new = _compact_messages(client, messages, config)
-                messages.clear()
-                messages.extend(new)
-                _emit({"type": "status",
-                       "message": f"会話を圧縮しました: {len(messages)} メッセージ"})
             elif cmd_name == "autoconfirm":
                 state["auto_confirm"] = not state.get("auto_confirm", False)
                 _emit({"type": "status",
@@ -2042,7 +2171,7 @@ def gui_main():
                 _emit({
                     "type": "skills_list",
                     "skills": [
-                        {"name": s.name, "description": s.description, "source": s.source}
+                        _skill_registry.skill_to_dict(s)
                         for s in skills
                     ],
                 })
@@ -2052,16 +2181,39 @@ def gui_main():
                 _emit({
                     "type": "skills_list",
                     "skills": [
-                        {"name": s.name, "description": s.description, "source": s.source}
+                        _skill_registry.skill_to_dict(s)
                         for s in skills
                     ],
                 })
                 _emit({"type": "status",
                        "message": f"スキルを再読み込みしました: {len(skills)} 個"})
+            elif cmd_name == "toggle_skill" and cmd_args:
+                skill_name = cmd_args.strip()
+                if skill_name in disabled_skills:
+                    disabled_skills.discard(skill_name)
+                    label = "有効"
+                else:
+                    disabled_skills.add(skill_name)
+                    label = "無効"
+                # config にも保存して永続化
+                config["disabled_skills"] = list(disabled_skills)
+                config["_disabled_skills"] = disabled_skills
+                _save_config({k: v for k, v in config.items() if not k.startswith("_")})
+                # システムプロンプトを再構築
+                _rebuild_system_prompt()
+                _emit({"type": "skill_toggled",
+                       "name": skill_name,
+                       "enabled": skill_name not in disabled_skills})
+                _emit({"type": "status",
+                       "message": f"スキル '{skill_name}' を{label}にしました"})
             elif cmd_name == "run_skill" and cmd_args:
                 parts = cmd_args.strip().split(None, 1)
                 skill_name = parts[0]
                 skill_extra = parts[1] if len(parts) > 1 else ""
+                if skill_name in disabled_skills:
+                    _emit({"type": "error",
+                           "message": f"スキル '{skill_name}' は無効化されています"})
+                    continue
                 skill = _skill_registry.get_skill(skill_name)
                 if skill is None:
                     _emit({"type": "error",
@@ -2094,6 +2246,7 @@ def gui_main():
                         t.start()
 
 
+
 # ─────────────────────────────────────────────
 # メイン (CLI REPL)
 # ─────────────────────────────────────────────
@@ -2102,7 +2255,7 @@ def gui_main():
 def main():
     global _ACTIVE_CONFIG
 
-    parser = argparse.ArgumentParser(description="codex_modoki agent")
+    parser = argparse.ArgumentParser(description="ucf_desktop agent")
     parser.add_argument("--gui", action="store_true",
                         help="Electron GUI モードで起動 (stdio JSON Lines)")
     args = parser.parse_args()
@@ -2150,7 +2303,7 @@ def main():
     ]
 
     print("=" * 60)
-    print(f"  {_bold('codex_modoki')} - ローカルファイル操作エージェント")
+    print(f"  {_bold('ucf_desktop')} - ローカルファイル操作エージェント")
     print(f"  OS: {platform.system()} | CWD: {os.getcwd()}")
     print(f"  Model: {config.get('model', 'gpt-4.1-mini')}")
     if base_url:

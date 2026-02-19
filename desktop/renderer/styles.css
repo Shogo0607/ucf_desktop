@@ -120,8 +120,21 @@ body {
   background: var(--bg-secondary);
 }
 
+/* Skill row: button + toggle */
+.skill-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--radius);
+  transition: opacity 0.2s;
+}
+.skill-row.skill-disabled {
+  opacity: 0.4;
+}
+
 .skill-btn {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   background: transparent;
   border: 1px solid transparent;
@@ -131,7 +144,6 @@ body {
   cursor: pointer;
   text-align: left;
   display: flex;
-  justify-content: space-between;
   align-items: center;
   transition: background 0.15s, border-color 0.15s;
 }
@@ -139,13 +151,80 @@ body {
   background: var(--bg-secondary);
   border-color: var(--border);
 }
+.skill-disabled .skill-btn {
+  cursor: default;
+}
+.skill-disabled .skill-btn:hover {
+  background: transparent;
+  border-color: transparent;
+}
 
 .skill-name {
   color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.skill-source {
-  font-size: 9px;
+.skill-disabled .skill-name {
   color: var(--text-dim);
+}
+.skill-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(91, 155, 213, 0.2);
+  color: var(--accent-blue);
+  flex-shrink: 0;
+}
+
+/* Toggle switch */
+.skill-toggle {
+  position: relative;
+  display: inline-block;
+  width: 28px;
+  height: 16px;
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.skill-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+.skill-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 8px;
+  transition: background 0.2s;
+}
+.skill-toggle-slider::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  left: 2px;
+  top: 2px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+.skill-toggle input:checked + .skill-toggle-slider {
+  background: var(--accent-green);
+}
+.skill-toggle input:checked + .skill-toggle-slider::before {
+  transform: translateX(12px);
+  background: #fff;
 }
 
 .skills-empty {
@@ -408,4 +487,33 @@ body {
   font-size: 12px;
   color: var(--accent-red);
   max-width: 85%;
+}
+
+/* ── Compacting spinner ───────────────────────────────────────── */
+#compacting-overlay {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+.compacting-spinner-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-tool-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 24px;
+}
+.compacting-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.compacting-label {
+  font-size: 13px;
+  color: var(--text-secondary);
 }
