@@ -43,6 +43,12 @@ from openai import OpenAI
 # .env ファイルから環境変数を読み込む（既存の環境変数は上書きしない）
 load_dotenv()
 
+# stdin/stdout を UTF-8 に強制（Windows / 一部環境での文字化け対策）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8")
+
 # ─────────────────────────────────────────────
 # カラー出力
 # ─────────────────────────────────────────────

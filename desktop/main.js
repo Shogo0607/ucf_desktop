@@ -84,13 +84,22 @@ function setupPythonBridge(win) {
   console.log(`Spawning: ${cmd} ${args.join(' ')}`);
   console.log(`CWD: ${workingDir}`);
 
+  const env = Object.assign({}, process.env, {
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUNBUFFERED: '1',
+  });
+
   pythonProcess = spawn(cmd, args, {
     cwd: workingDir,
-    env: process.env,
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
     windowsHide: true,
   });
+
+  // stdout / stderr を UTF-8 で読む
+  pythonProcess.stdout.setEncoding('utf-8');
+  pythonProcess.stderr.setEncoding('utf-8');
 
   // stdout を行ごとに読んで JSON パース → renderer に転送
   const rl = readline.createInterface({ input: pythonProcess.stdout });
@@ -136,7 +145,7 @@ function setupPythonBridge(win) {
   // renderer → Python stdin
   ipcMain.on('send-to-python', (_event, msg) => {
     if (pythonProcess && pythonProcess.stdin.writable) {
-      pythonProcess.stdin.write(JSON.stringify(msg) + '\n');
+      pythonProcess.stdin.write(JSON.stringify(msg) + '\n', 'utf-8');
     }
   });
 }
