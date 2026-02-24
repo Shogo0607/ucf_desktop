@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const readline = require('readline');
@@ -18,7 +18,7 @@ function resolveCommand() {
     execSync('uv --version', { stdio: 'ignore' });
     return {
       cmd: plat === 'win32' ? 'uv.exe' : 'uv',
-      buildArgs: (agentPath) => ['run', agentPath, '--gui'],
+      buildArgs: (agentPath) => ['run', 'python', agentPath, '--gui'],
     };
   } catch (_) { /* uv not found */ }
 
@@ -64,6 +64,13 @@ function getAgentPath() {
 // ── Python プロセスの起動と IPC ブリッジ ──────────────────────
 
 function setupPythonBridge(win) {
+  // ウィンドウ破棄済みかチェックしてから送信するヘルパー
+  function safeSend(channel, data) {
+    if (!win.isDestroyed()) {
+      win.webContents.send(channel, data);
+    }
+  }
+
   const agentPath = getAgentPath();
   const workingDir = path.dirname(agentPath);
 
@@ -71,7 +78,7 @@ function setupPythonBridge(win) {
   try {
     resolved = resolveCommand();
   } catch (err) {
-    win.webContents.send('python-message', {
+    safeSend('python-message', {
       type: 'error',
       message: err.message,
     });
@@ -108,27 +115,32 @@ function setupPythonBridge(win) {
     if (!line) return;
     try {
       const msg = JSON.parse(line);
-      win.webContents.send('python-message', msg);
+      safeSend('python-message', msg);
     } catch (e) {
       console.error('Failed to parse Python output:', line);
     }
   });
 
-  // stderr をエラーとして転送
+  // stderr をログ出力（PDF 分析等のログは UI に表示しない）
   pythonProcess.stderr.on('data', (data) => {
     const text = data.toString().trim();
     if (text) {
       console.error('[Python stderr]', text);
-      win.webContents.send('python-message', {
-        type: 'error',
-        message: text,
-      });
+      // PDF 分析のログや tqdm 出力は UI に表示しない
+      const isPdfLog = /^(Checking for|Found \d+|Processing |  Converting|  Starting batch|  Saved |  Finished |  Created output|  Moving |  Failed to|No new PDFs|Error (processing|summarizing) page)/i.test(text);
+      const isTqdmOutput = /\d+%\||\|.*\d+\/\d+/.test(text);
+      if (!isPdfLog && !isTqdmOutput) {
+        safeSend('python-message', {
+          type: 'error',
+          message: text,
+        });
+      }
     }
   });
 
   pythonProcess.on('close', (code) => {
     console.log('Python process exited with code', code);
-    win.webContents.send('python-message', {
+    safeSend('python-message', {
       type: 'error',
       message: `Python プロセスが終了しました (code ${code})`,
     });
@@ -136,7 +148,7 @@ function setupPythonBridge(win) {
 
   pythonProcess.on('error', (err) => {
     console.error('Failed to spawn Python:', err);
-    win.webContents.send('python-message', {
+    safeSend('python-message', {
       type: 'error',
       message: `Python の起動に失敗しました: ${err.message}`,
     });
@@ -149,6 +161,19 @@ function setupPythonBridge(win) {
     }
   });
 }
+
+// ── フォルダ選択ダイアログ ─────────────────────────────────────
+
+ipcMain.handle('select-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'RAG 対象フォルダを選択',
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
+});
 
 // ── ウィンドウ作成 ───────────────────────────────────────────
 

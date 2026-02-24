@@ -4,7 +4,9 @@ const state = {
   isBusy: false,
   autoConfirm: false,
   currentAssistantEl: null,
+  currentAssistantRaw: '',   // Raw markdown text accumulator
   disabledSkills: new Set(),
+  ragFolders: [],            // Extra RAG folders (absolute paths)
 };
 
 // ── DOM refs ───────────────────────────────────────────────────
@@ -18,6 +20,8 @@ const btnClear     = document.getElementById('btn-clear');
 const btnAutoconf  = document.getElementById('btn-autoconfirm');
 const skillsListEl = document.getElementById('skills-list');
 const btnSkillsReload = document.getElementById('btn-skills-reload');
+const ragFoldersEl = document.getElementById('rag-folders');
+const btnAddFolder = document.getElementById('btn-add-folder');
 
 // ── Tool card queue (FIFO for matching tool_call -> tool_result) ──
 const pendingToolCards = [];
@@ -43,6 +47,7 @@ function startAssistantMessage() {
   group.appendChild(bubble);
   messagesEl.appendChild(group);
   state.currentAssistantEl = bubble;
+  state.currentAssistantRaw = '';
   scrollToBottom();
   return bubble;
 }
@@ -51,14 +56,48 @@ function appendToken(content) {
   if (!state.currentAssistantEl) {
     startAssistantMessage();
   }
-  state.currentAssistantEl.textContent += content;
+  // Accumulate raw markdown
+  state.currentAssistantRaw += content;
+  // Render markdown incrementally (innerHTML with parsed markdown)
+  state.currentAssistantEl.innerHTML = renderMarkdown(state.currentAssistantRaw);
   scrollToBottom();
 }
 
 function finalizeAssistantMessage() {
   if (state.currentAssistantEl) {
+    // Final render of complete markdown
+    if (state.currentAssistantRaw) {
+      state.currentAssistantEl.innerHTML = renderMarkdown(state.currentAssistantRaw);
+    }
     state.currentAssistantEl.classList.remove('streaming-cursor');
     state.currentAssistantEl = null;
+    state.currentAssistantRaw = '';
+  }
+}
+
+// Initialize marked (loaded via <script> tag as UMD global)
+if (typeof marked !== 'undefined') {
+  marked.setOptions({ breaks: true, gfm: true });
+}
+
+function renderMarkdown(text) {
+  if (!text) return '';
+  try {
+    let html = marked.parse(text);
+    // 出典カード変換: <!-- sources --> ... <!-- /sources --> ブロックを検出
+    html = html.replace(
+      /<!--\s*sources\s*-->([\s\S]*?)<!--\s*\/sources\s*-->/g,
+      (_, inner) => {
+        return '<div class="source-card">' +
+          '<div class="source-card-title"><span>&#128269;</span> 参照元</div>' +
+          inner +
+          '</div>';
+      }
+    );
+    return html;
+  } catch (e) {
+    // Fallback to escaped plain text
+    return escHtml(text).replace(/\n/g, '<br>');
   }
 }
 
@@ -209,7 +248,8 @@ window.agent.onMessage((msg) => {
       }
       enableInput();
       if (msg.has_context) {
-        appendStatusMessage('プロジェクトコンテキスト読み込み済み');
+        appendStatusMessage('プロジェクトコンテキスト読み込み済み', true);
+        setTimeout(removeEphemeralStatus, 3000);
       }
       if (msg.skills && msg.skills.length > 0) {
         renderSkillsList(msg.skills);
@@ -278,6 +318,10 @@ window.agent.onMessage((msg) => {
       appendStatusMessage(msg.message || '会話を自動圧縮しました');
       break;
 
+    case 'pdf_progress':
+      handlePdfProgress(msg);
+      break;
+
     case 'error':
       finalizeAssistantMessage();
       hideCompactingSpinner();
@@ -294,14 +338,24 @@ function sendMessage() {
   const content = inputEl.value.trim();
   if (!content || state.isBusy || !state.isConnected) return;
 
-  appendUserMessage(content);
+  // Show folder info in user message if folders are attached
+  if (state.ragFolders.length > 0) {
+    const folderNames = state.ragFolders.map(f => f.split('/').pop() || f);
+    appendUserMessage(content + '\n[RAG folders: ' + folderNames.join(', ') + ']');
+  } else {
+    appendUserMessage(content);
+  }
   inputEl.value = '';
   autoResizeInput();
 
   setBusy(true);
   setStatus('busy');
 
-  window.agent.sendMessage(content);
+  if (state.ragFolders.length > 0) {
+    window.agent.sendMessageWithFolders(content, state.ragFolders);
+  } else {
+    window.agent.sendMessage(content);
+  }
 }
 
 // ── Input handling ─────────────────────────────────────────────
@@ -319,6 +373,40 @@ sendBtn.addEventListener('click', sendMessage);
 function autoResizeInput() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+}
+
+// ── RAG folder management ──────────────────────────────────────
+
+btnAddFolder.addEventListener('click', async () => {
+  const folderPath = await window.agent.selectFolder();
+  if (!folderPath) return;
+  // Avoid duplicates
+  if (state.ragFolders.includes(folderPath)) return;
+  state.ragFolders.push(folderPath);
+  renderRagFolders();
+});
+
+function renderRagFolders() {
+  ragFoldersEl.innerHTML = '';
+  if (state.ragFolders.length === 0) {
+    ragFoldersEl.classList.add('hidden');
+    return;
+  }
+  ragFoldersEl.classList.remove('hidden');
+  state.ragFolders.forEach((folder, idx) => {
+    const chip = document.createElement('span');
+    chip.className = 'rag-folder-chip';
+    const name = folder.split('/').pop() || folder;
+    chip.innerHTML =
+      '<span class="rag-folder-icon">&#128193;</span>' +
+      '<span class="rag-folder-name" title="' + escHtml(folder) + '">' + escHtml(name) + '</span>' +
+      '<button class="rag-folder-remove" title="削除">&times;</button>';
+    chip.querySelector('.rag-folder-remove').addEventListener('click', () => {
+      state.ragFolders.splice(idx, 1);
+      renderRagFolders();
+    });
+    ragFoldersEl.appendChild(chip);
+  });
 }
 
 // ── Sidebar buttons ────────────────────────────────────────────
@@ -425,6 +513,36 @@ function showCompactingSpinner() {
 function hideCompactingSpinner() {
   const overlay = document.getElementById('compacting-overlay');
   if (overlay) overlay.remove();
+}
+
+// ── PDF progress ────────────────────────────────────────────────
+
+function handlePdfProgress(msg) {
+  const container = document.getElementById('pdf-progress');
+  const label = document.getElementById('pdf-progress-label');
+  const detail = document.getElementById('pdf-progress-detail');
+  const bar = document.getElementById('pdf-progress-bar');
+
+  if (msg.status === 'done') {
+    container.classList.add('hidden');
+    return;
+  }
+
+  // Show the progress banner
+  container.classList.remove('hidden');
+
+  // File label
+  const fileInfo = msg.total_files > 1
+    ? `[${msg.file_index + 1}/${msg.total_files}] `
+    : '';
+  label.textContent = `${fileInfo}${msg.file || 'PDF分析中...'}`;
+
+  // Detail text
+  detail.textContent = msg.detail || '';
+
+  // Progress bar
+  const pct = Math.min(Math.max(msg.percent || 0, 0), 100);
+  bar.style.width = pct + '%';
 }
 
 // ── Utilities ──────────────────────────────────────────────────

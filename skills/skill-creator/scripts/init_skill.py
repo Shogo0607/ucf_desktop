@@ -2,12 +2,12 @@
 """スキルのディレクトリ構造を初期化するスクリプト。
 
 Usage:
-    python3 init_skill.py <skill-name> --path <output-directory>
-    python3 init_skill.py <skill-name>  # デフォルトは ./skills/
+    uv run python init_skill.py <skill-name> --path <output-directory>
+    uv run python init_skill.py <skill-name>  # デフォルトは ./skills/
 
 Examples:
-    python3 init_skill.py deploy-helper --path skills/
-    python3 init_skill.py code-review --path ~/.ucf_desktop/skills/
+    uv run python init_skill.py deploy-helper --path skills/
+    uv run python init_skill.py code-review --path ~/.ucf_desktop/skills/
 """
 
 import argparse

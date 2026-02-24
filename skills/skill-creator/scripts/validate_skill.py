@@ -2,10 +2,10 @@
 """作成したスキルの構造を検証するスクリプト。
 
 Usage:
-    python3 validate_skill.py <path/to/skill-folder>
+    uv run python validate_skill.py <path/to/skill-folder>
 
 Examples:
-    python3 validate_skill.py skills/deploy-helper
+    uv run python validate_skill.py skills/deploy-helper
 """
 
 import sys
@@ -112,7 +112,7 @@ def validate_skill(skill_path: str) -> bool:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 validate_skill.py <path/to/skill-folder>")
+        print("Usage: uv run python validate_skill.py <path/to/skill-folder>")
         sys.exit(1)
     ok = validate_skill(sys.argv[1])
     sys.exit(0 if ok else 1)

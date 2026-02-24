@@ -1,11 +1,3 @@
-#!/usr/bin/env -S uv run
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#     "openai",
-#     "python-dotenv",
-# ]
-# ///
 """
 ucf_desktop - ローカルファイル操作AIエージェント
 Claude Code / Codex 風の対話型エージェント。
@@ -734,6 +726,25 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "think",
+            "description": "推論・思考のステップを明示的に記録する。"
+            "ReAct パターンで「次に何をすべきか」「なぜその行動を取るか」を整理するために使う。"
+            "ユーザーに進行状況として表示される。実際の処理は行わない。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "現在の思考・推論内容（例: 「冷蔵庫の仕様ファイルを3つ発見。次は消費電力の比較のため各ファイルを読む」）",
+                    },
+                },
+                "required": ["thought"],
+            },
+        },
+    },
 ]
 
 # ─────────────────────────────────────────────
@@ -798,6 +809,41 @@ def tool_read_file(
     except UnicodeDecodeError:
         return f"[error] バイナリファイルまたはエンコーディング '{encoding}' で読み込めません: {resolved}"
     except FileNotFoundError:
+        # database/ 内のファイルならファイル名で再検索を試みる
+        fname = Path(resolved).name
+        db_dir = Path.cwd() / "database"
+        if db_dir.is_dir() and "database" in resolved:
+            candidates = list(db_dir.rglob(fname))
+            # 元のパスの構成要素との一致数でスコアリングし、最も一致する候補を優先
+            if len(candidates) > 1:
+                orig_parts = set(Path(resolved).parts)
+                scored = []
+                for c in candidates:
+                    score = len(orig_parts & set(c.parts))
+                    scored.append((score, c))
+                scored.sort(key=lambda x: -x[0])
+                best_score = scored[0][0]
+                candidates = [c for s, c in scored if s == best_score]
+            if candidates:
+                found = str(candidates[0])
+                hint = f"[hint] 指定パスにファイルがありません。代わりに見つかったファイル:\n"
+                for c in candidates:
+                    hint += f"  - {c}\n"
+                # 候補が1つなら自動で読み込む
+                if len(candidates) == 1:
+                    try:
+                        with open(found, "r", encoding=encoding) as f2:
+                            lines2 = f2.readlines()
+                        total2 = len(lines2)
+                        selected2 = lines2[offset:] if limit is None else lines2[offset : offset + limit]
+                        content2 = "".join(selected2)
+                        if len(content2) > 100_000:
+                            content2 = content2[:100_000] + f"\n\n[...truncated]"
+                        header2 = f"[auto-resolved: {found}] ({total2} lines total)\n"
+                        return header2 + content2
+                    except Exception:
+                        pass
+                return hint
         return f"[error] ファイルが見つかりません: {resolved}"
     except PermissionError:
         return f"[error] 読み取り権限がありません: {resolved}"
@@ -1190,6 +1236,15 @@ def tool_run_skill(name: str, arguments: str = "") -> str:
     return result
 
 
+def tool_think(thought: str) -> str:
+    """ReAct の Thought ステップ。推論内容を表示し、進行状況をユーザーに伝える。"""
+    if _GUI_MODE:
+        _emit({"type": "status", "message": f"💭 {thought}", "ephemeral": True})
+    else:
+        print(f"\n  {_cyan('💭')} {_dim(thought)}")
+    return f"[thought] {thought}"
+
+
 # ─────────────────────────────────────────────
 # ツールディスパッチ
 # ─────────────────────────────────────────────
@@ -1205,12 +1260,62 @@ TOOL_FUNCTIONS = {
     "get_file_info": tool_get_file_info,
     "run_python_sandbox": tool_run_python_sandbox,
     "run_skill": tool_run_skill,
+    "think": tool_think,
 }
 
 DESTRUCTIVE_TOOLS = {"run_command", "write_file", "edit_file"}
 
+# スキルスクリプトなど確認不要な run_command パターン
+# ここに含まれるプレフィックスで始まるコマンドは確認なしで実行される
+SAFE_COMMAND_PREFIXES = (
+    "uv run python skills/",
+    "uv run python pdf/",
+)
+
 # 設定のグローバル参照（main で上書き）
 _ACTIVE_CONFIG: dict = dict(DEFAULT_CONFIG)
+
+
+# ─────────────────────────────────────────────
+# 起動時 PDF 自動分析
+# ─────────────────────────────────────────────
+
+def _run_pdf_analysis_background(client: OpenAI, config: dict):
+    """database/ 内の未処理 PDF をバックグラウンドで分析する。"""
+    database_dir = os.path.join(os.getcwd(), "database")
+    if not os.path.isdir(database_dir):
+        return
+
+    def _pdf_progress(data: dict):
+        """PDF 分析の進捗を GUI に送信する。"""
+        if _GUI_MODE:
+            _emit({"type": "pdf_progress", **data})
+
+    try:
+        from pdf.analyzer import analyze_new_pdfs
+        model = config.get("model", "gpt-4.1-mini")
+        analyze_new_pdfs(
+            database_dir=database_dir,
+            client=client,
+            vision_model=model,
+            summary_model=model,
+            progress_callback=_pdf_progress if _GUI_MODE else None,
+        )
+    except Exception as e:
+        if _GUI_MODE:
+            sys.stderr.write(f"PDF analysis error: {e}\n")
+        else:
+            print(f"  PDF analysis error: {e}")
+
+
+def _start_pdf_analysis(client: OpenAI, config: dict):
+    """PDF 分析をバックグラウンドスレッドで起動する。"""
+    t = threading.Thread(
+        target=_run_pdf_analysis_background,
+        args=(client, config),
+        daemon=True,
+    )
+    t.start()
 
 
 def execute_tool(name: str, arguments: dict) -> str:
@@ -1538,6 +1643,15 @@ def _execute_tools_parallel(
     for i, tc_data in enumerate(tool_calls_data):
         fn_name = tc_data["function"]["name"]
         if fn_name in DESTRUCTIVE_TOOLS and not auto_confirm:
+            # ホワイトリストに該当する run_command は安全扱い
+            if fn_name == "run_command":
+                try:
+                    cmd = json.loads(tc_data["function"]["arguments"]).get("command", "")
+                except (json.JSONDecodeError, AttributeError):
+                    cmd = ""
+                if any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
+                    safe_indices.append(i)
+                    continue
             destructive_indices.append(i)
         else:
             safe_indices.append(i)
@@ -1588,8 +1702,11 @@ def chat(
     """
     model = config.get("model", "gpt-4.1-mini")
 
+    _last_think_msg = ""  # Track last think message for spinner
+
     while True:
-        spinner = Spinner("thinking...")
+        spinner_msg = f"💭 {_last_think_msg}" if _last_think_msg else "thinking..."
+        spinner = Spinner(spinner_msg)
         spinner.start()
         stream = _api_call_with_retry(
             client,
@@ -1700,11 +1817,14 @@ def chat(
                     _emit({"type": "tool_result", "name": fn_name,
                            "result": result[:500], "status": status})
                 else:
-                    result_preview = result.replace("\n", " ")[:150]
-                    if status != "ok":
-                        print(f"  {_red('↳')} {_dim(fn_name + ': ' + result_preview)}")
-                    else:
-                        print(f"  {_green('↳')} {_dim(fn_name + ': ' + result_preview)}")
+                    if fn_name != "think":
+                        result_preview = result.replace("\n", " ")[:150]
+                        if status != "ok":
+                            print(f"  {_red('↳')} {_dim(fn_name + ': ' + result_preview)}")
+                        else:
+                            print(f"  {_green('↳')} {_dim(fn_name + ': ' + result_preview)}")
+                if fn_name == "think":
+                    _last_think_msg = fn_args.get("thought", "")[:80] if isinstance(fn_args, dict) else ""
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_data["id"],
@@ -1720,7 +1840,13 @@ def chat(
                 fn_args = {}
 
             if fn_name in DESTRUCTIVE_TOOLS and not auto_confirm:
-                if not _ask_confirmation(fn_name, fn_args):
+                # ホワイトリストに該当する run_command は確認スキップ
+                skip_confirm = False
+                if fn_name == "run_command":
+                    cmd = fn_args.get("command", "")
+                    if any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
+                        skip_confirm = True
+                if not skip_confirm and not _ask_confirmation(fn_name, fn_args):
                     result = "[skipped] ユーザーがキャンセルしました"
                     if _GUI_MODE:
                         _emit({"type": "tool_result", "name": fn_name,
@@ -1739,11 +1865,18 @@ def chat(
                 _emit({"type": "tool_result", "name": fn_name,
                        "result": result[:500], "status": status})
             else:
-                result_preview = result.replace("\n", " ")[:150]
-                if result.startswith("[error]"):
-                    print(f"  {_red('↳')} {_dim(result_preview)}")
-                else:
-                    print(f"  {_green('↳')} {_dim(result_preview)}")
+                # think ツールは既に表示済みなので結果プレビューを省略
+                if fn_name != "think":
+                    result_preview = result.replace("\n", " ")[:150]
+                    if result.startswith("[error]"):
+                        print(f"  {_red('↳')} {_dim(result_preview)}")
+                    else:
+                        print(f"  {_green('↳')} {_dim(result_preview)}")
+
+            # think の内容を保持して次回のスピナーに反映
+            if fn_name == "think":
+                _last_think_msg = fn_args.get("thought", "")[:80]
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc_data["id"],
@@ -2050,10 +2183,13 @@ def gui_main():
     # スキルのスキャン
     _skill_registry.scan()
 
+    # 起動時 PDF 自動分析（バックグラウンド）
+    _start_pdf_analysis(client, config)
+
     # 初回自動コンテキスト収集
     project_context = ""
     if config.get("auto_context", True):
-        _emit({"type": "status", "message": "プロジェクトコンテキストを収集中..."})
+        _emit({"type": "status", "message": "プロジェクトコンテキストを収集中...", "ephemeral": True})
         try:
             project_context = _collect_project_context(
                 max_files=config.get("auto_context_max_files", 50)
@@ -2106,6 +2242,17 @@ def gui_main():
             if _chat_in_progress.is_set():
                 _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
                 continue
+
+            # RAG フォルダが指定されている場合、コンテキストに追加
+            rag_folders = msg.get("rag_folders", [])
+            if rag_folders:
+                folder_list = "\n".join(f"  - {f}" for f in rag_folders)
+                content += (
+                    f"\n\n[RAG追加フォルダ指定]\n"
+                    f"以下のフォルダもRAG検索対象に含めてください。"
+                    f"search_json.py の --dir オプションでこれらのフォルダも検索すること"
+                    f"（database と同様に各フォルダに対して実行）:\n{folder_list}"
+                )
 
             messages_ref = messages  # 参照を保持
             messages_ref[:] = _auto_trim(messages_ref, config)
@@ -2285,6 +2432,9 @@ def main():
     # スキルのスキャン
     _skill_registry.scan()
     skill_count = len(_skill_registry.list_skills())
+
+    # 起動時 PDF 自動分析（バックグラウンド）
+    _start_pdf_analysis(client, config)
 
     # 初回自動コンテキスト収集
     project_context = ""

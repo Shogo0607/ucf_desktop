@@ -32,19 +32,34 @@
       </div>
 
       <div id="chat-container">
+        <div id="pdf-progress" class="pdf-progress hidden">
+          <div class="pdf-progress-spinner"></div>
+          <div class="pdf-progress-text">
+            <span id="pdf-progress-label">PDF分析中...</span>
+            <span id="pdf-progress-detail"></span>
+          </div>
+          <div class="pdf-progress-bar-track">
+            <div id="pdf-progress-bar" class="pdf-progress-bar-fill"></div>
+          </div>
+        </div>
         <div id="messages"></div>
       </div>
 
       <div id="input-area">
-        <textarea id="user-input"
-          placeholder="メッセージを入力... (Enter で送信, Shift+Enter で改行)"
-          rows="1"
-          disabled></textarea>
-        <button id="send-btn" disabled>送信</button>
+        <div id="rag-folders" class="rag-folders hidden"></div>
+        <div id="input-row">
+          <button id="btn-add-folder" class="add-folder-btn" title="RAG 対象フォルダを追加">+</button>
+          <textarea id="user-input"
+            placeholder="メッセージを入力... (Enter で送信, Shift+Enter で改行)"
+            rows="1"
+            disabled></textarea>
+          <button id="send-btn" disabled>送信</button>
+        </div>
       </div>
     </div>
   </div>
 
+  <script src="marked.umd.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

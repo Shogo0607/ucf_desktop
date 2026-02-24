@@ -59,7 +59,7 @@ skill-name/
 `scripts/init_skill.py` を使ってスキルディレクトリを初期化する:
 
 ```
-run_command: python3 {このスキルの scripts ディレクトリの絶対パス}/init_skill.py <skill-name> --path skills/
+run_command: uv run python {このスキルの scripts ディレクトリの絶対パス}/init_skill.py <skill-name> --path skills/
 ```
 
 init_skill.py は正しい frontmatter 付きの SKILL.md テンプレートを自動生成する。
@@ -77,7 +77,7 @@ scripts/ が必要な場合は `write_file` で追加ファイルを作成する
 `scripts/validate_skill.py` で構造を検証する:
 
 ```
-run_command: python3 {このスキルの scripts ディレクトリの絶対パス}/validate_skill.py skills/<skill-name>
+run_command: uv run python {このスキルの scripts ディレクトリの絶対パス}/validate_skill.py skills/<skill-name>
 ```
 
 エラーが出たら `edit_file` で修正し、再度検証する。
