@@ -182,8 +182,6 @@ def _load_config() -> dict:
             config.update(project_cfg)
         except Exception:
             pass
-    print(f"[config] timeout={config.get('timeout')} "
-          f"config_file={_CONFIG_FILE}", file=sys.stderr)
     return config
 
 
@@ -1071,7 +1069,6 @@ def tool_run_python_sandbox(code: str, **kwargs) -> str:
     - 危険なモジュールの import を禁止
     """
     timeout = _ACTIVE_CONFIG.get("timeout", 120)
-    print(f"[sandbox] timeout={timeout}, config_timeout={_ACTIVE_CONFIG.get('timeout', 'NOT SET')}", file=sys.stderr)
 
     # 危険な import / 操作をチェック
     forbidden_patterns = [
