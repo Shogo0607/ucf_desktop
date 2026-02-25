@@ -1,0 +1,65 @@
+---
+name: P1
+description: 重大違反ゼロ（罰金・行政指導）に関するKPI確認。ユーザーが重大違反、罰金、行政指導、P1、コンプライアンス違反の状況について質問したときに使用する
+---
+
+# P1 — 重大違反ゼロ（罰金・行政指導）KPI確認スキル
+
+重大違反ゼロ（罰金・行政指導）のKPIデータを xlsb ファイルから読み込み、ユーザーの質問に回答する。
+
+## 対象ファイル
+
+- ファイル名パターン: `*_S04_1_output.xlsb`
+- シート: `List_1`
+- ヘッダー開始位置: **8行目・B列**
+
+## ワークフロー
+
+1. プロジェクト内で `*_S04_1_output.xlsb` ファイルを探す
+2. `List_1` シートのヘッダー一覧を確認してデータ構造を把握する
+3. ユーザーの質問に応じて `read` / `search` / `info` コマンドを使い分ける
+4. 取得したデータをもとにユーザーへ回答する
+
+## コマンド
+
+### ファイル探索（最初に実行）
+```bash
+find . -name "*_S04_1_output.xlsb" -type f
+```
+
+### ヘッダー一覧
+```bash
+uv run python {scripts}/read_xlsb.py headers <xlsb_file> --sheet List_1
+```
+
+### データ読み込み
+```bash
+uv run python {scripts}/read_xlsb.py read <xlsb_file> --sheet List_1 [--limit N]
+```
+
+### キーワード検索
+```bash
+uv run python {scripts}/read_xlsb.py search <xlsb_file> "キーワード" --sheet List_1
+```
+
+### 統計情報
+```bash
+uv run python {scripts}/read_xlsb.py info <xlsb_file> --sheet List_1
+```
+
+## 共通オプション
+
+| オプション | デフォルト | 説明 |
+|---|---|---|
+| `--header-row` | `8` | ヘッダー行番号（1-indexed） |
+| `--start-col` | `B` | 開始列（A, B, C, ...） |
+| `--sheet` | 最初のシート | 対象シート名（P1では `List_1` を使う） |
+| `--limit` | `50` | 表示行数（read コマンド用） |
+
+## 回答のルール
+
+- データの要約・集計はスクリプト出力をもとに行う
+- 大量データの場合は `--limit` で適切に絞る
+- 検索時は `search` コマンドを活用し、必要な行だけ取得する
+- 数値データの場合は `info` コマンドで統計情報を先に確認する
+- KPIの観点で「重大違反ゼロ」が達成されているかどうかを明確に回答する
