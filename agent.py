@@ -157,8 +157,12 @@ def _emit(obj: dict) -> None:
 # 設定ファイル
 # ─────────────────────────────────────────────
 
-_CONFIG_DIR = Path.home() / ".ucf_desktop"
-_CONFIG_FILE = _CONFIG_DIR / "config.json"
+_PROJECT_DIR = Path(__file__).resolve().parent
+_PROJECT_CONFIG_DIR = _PROJECT_DIR / ".ucf_desktop"
+_PROJECT_CONFIG_FILE = _PROJECT_CONFIG_DIR / "config.json"
+
+_USER_CONFIG_DIR = Path.home() / ".ucf_desktop"
+_USER_CONFIG_FILE = _USER_CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "model": "gpt-4.1-mini",
@@ -172,10 +176,20 @@ DEFAULT_CONFIG = {
 
 
 def _load_config() -> dict:
+    """設定を読み込む。優先順位: ユーザー設定 > プロジェクト設定 > DEFAULT_CONFIG"""
     config = dict(DEFAULT_CONFIG)
-    if _CONFIG_FILE.exists():
+    # 1. プロジェクト内の設定（リポジトリに含まれ、git pullで全ユーザに適用）
+    if _PROJECT_CONFIG_FILE.exists():
         try:
-            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(_PROJECT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                project_cfg = json.load(f)
+            config.update(project_cfg)
+        except Exception:
+            pass
+    # 2. ユーザー個別の設定（ホームディレクトリ、個人カスタマイズ用）
+    if _USER_CONFIG_FILE.exists():
+        try:
+            with open(_USER_CONFIG_FILE, "r", encoding="utf-8") as f:
                 user_cfg = json.load(f)
             config.update(user_cfg)
         except Exception:
@@ -184,9 +198,10 @@ def _load_config() -> dict:
 
 
 def _save_config(config: dict) -> None:
+    """ユーザー個別の設定をホームディレクトリに保存する。"""
     try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+        _USER_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_USER_CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception:
         pass

@@ -1,0 +1,9 @@
+{
+  "model": "gpt-4.1-mini",
+  "timeout": 120,
+  "auto_confirm": false,
+  "max_context_messages": 200,
+  "compact_keep_recent": 10,
+  "auto_context": true,
+  "auto_context_max_files": 50
+}
