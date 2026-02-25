@@ -204,3 +204,4 @@ uv run python {scripts}/read_xlsb.py info <xlsb_file> --sheet List_1
 - 検索時は `search` コマンドを活用し、必要な行だけ取得する
 - 数値データの場合は `info` コマンドで統計情報を先に確認する
 - KPIの観点で「重大違反ゼロ」が達成されているかどうかを明確に回答する
+- **Pythonスクリプトの新規作成・実行は禁止。** 上記「コマンド」セクションに記載された `read_xlsb.py` のコマンド（`headers` / `read` / `search` / `info`）のみを使用すること。データのフィルタや集計が必要な場合は、コマンド出力をLLMが読み取り、LLM自身の推論で判定・回答を行う
