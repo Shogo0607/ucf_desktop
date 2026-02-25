@@ -319,7 +319,7 @@ def _build_system_prompt(config: dict, project_context: str = "", disabled_skill
   - pip install の代わりに `uv add` または `uv pip install` を使ってください。
 - **Pythonコードのサンドボックス実行**: 計算やデータ処理など安全なPythonコードを実行したい場合は `run_python_sandbox` ツールを使ってください。
   - サンドボックスでは os, sys, subprocess, open() 等の危険な操作は禁止されています。
-  - タイムアウトは最大60秒、メモリは256MBに制限されています。
+  - タイムアウトは最大120秒、メモリは256MBに制限されています。
   - ファイル操作やネットワーク通信が必要な場合は `run_command` ツールを使ってください。
   - 何かうまくいかなかった場合の原因調査やデータ分析に積極的に活用してください。
 """
@@ -697,7 +697,7 @@ TOOLS = [
                     },
                     "timeout": {
                         "type": "integer",
-                        "description": "タイムアウト秒数（省略時は30秒、最大60秒）",
+                        "description": "タイムアウト秒数（省略時は120秒、最大120秒）",
                     },
                 },
                 "required": ["code"],
@@ -1069,15 +1069,15 @@ def tool_run_python_sandbox(code: str, timeout: Optional[int] = None) -> str:
     """Pythonコードをサンドボックス環境で実行する。
 
     制限:
-    - タイムアウト（デフォルト30秒、最大60秒）
+    - タイムアウト（デフォルト120秒、最大120秒）
     - ネットワークアクセス不可（import制限による簡易ブロック）
     - ファイル書き込み不可（一時ディレクトリ内のみ許可）
     - 危険なモジュールの import を禁止
     """
     if timeout is None:
-        timeout = min(_ACTIVE_CONFIG.get("timeout", 30), 60)
+        timeout = min(_ACTIVE_CONFIG.get("timeout", 120), 120)
     else:
-        timeout = min(timeout, 60)
+        timeout = min(timeout, 120)
 
     # 危険な import / 操作をチェック
     forbidden_patterns = [
