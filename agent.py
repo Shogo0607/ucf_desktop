@@ -23,7 +23,6 @@ import subprocess
 import sys
 import time
 import threading
-import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -320,10 +319,7 @@ def _build_system_prompt(config: dict, project_context: str = "", disabled_skill
   - 仮想環境作成: `uv venv`
   - プロジェクト初期化: `uv init`
   - pip install の代わりに `uv add` または `uv pip install` を使ってください。
-- **Pythonコードのサンドボックス実行**: 計算やデータ処理など安全なPythonコードを実行したい場合は `run_python_sandbox` ツールを使ってください。
-  - サンドボックスでは os, sys, subprocess, open() 等の危険な操作は禁止されています。
-  - タイムアウトは最大120秒、メモリは256MBに制限されています。
-  - ファイル操作やネットワーク通信が必要な場合は `run_command` ツールを使ってください。
+- **Pythonコード実行**: 計算やデータ処理などPythonコードを実行したい場合は `run_command` ツールで `uv run python -c "コード"` または一時ファイルに書き出して `uv run python script.py` で実行してください。
   - 何かうまくいかなかった場合の原因調査やデータ分析に積極的に活用してください。
 """
     # スキル一覧をシステムプロンプトに追加（有効なスキルのみ）
@@ -676,26 +672,6 @@ TOOLS = [
                     },
                 },
                 "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_python_sandbox",
-            "description": "Pythonコードをサンドボックス環境で安全に実行する。"
-            "一時ファイルにコードを書き出し、制限付きサブプロセスで実行する。"
-            "ファイル操作やネットワーク通信が必要な場合は run_command を使うこと。"
-            "データ解析・計算・テキスト処理など安全なコードの実行に適している。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "実行するPythonコード",
-                    },
-                },
-                "required": ["code"],
             },
         },
     },
@@ -1059,114 +1035,6 @@ def tool_get_file_info(path: str) -> str:
         return f"[error] {e}"
 
 
-def tool_run_python_sandbox(code: str, **kwargs) -> str:
-    """Pythonコードをサンドボックス環境で実行する。
-
-    制限:
-    - タイムアウトは設定値を使用（デフォルト120秒）
-    - ネットワークアクセス不可（import制限による簡易ブロック）
-    - ファイル書き込み不可（一時ディレクトリ内のみ許可）
-    - 危険なモジュールの import を禁止
-    """
-    timeout = _ACTIVE_CONFIG.get("timeout", 120)
-
-    # 危険な import / 操作をチェック
-    forbidden_patterns = [
-        r'\bimport\s+(?:os|sys|subprocess|shutil|signal|ctypes|socket|http|urllib|requests|pathlib)\b',
-        r'\bfrom\s+(?:os|sys|subprocess|shutil|signal|ctypes|socket|http|urllib|requests|pathlib)\b',
-        r'\b__import__\s*\(',
-        r'\bexec\s*\(',
-        r'\beval\s*\(',
-        r'\bopen\s*\(',
-        r'\bglobals\s*\(',
-        r'\blocals\s*\(',
-        r'\bgetattr\s*\(',
-        r'\bsetattr\s*\(',
-        r'\bdelattr\s*\(',
-        r'\bcompile\s*\(',
-        r'\bbreakpoint\s*\(',
-    ]
-    for pat in forbidden_patterns:
-        match = re.search(pat, code)
-        if match:
-            return f"[sandbox error] 禁止された操作が含まれています: {match.group()}\nサンドボックスでは os, sys, subprocess, open() 等は使用できません。\nファイル操作が必要な場合は run_command ツールを使ってください。"
-
-    # サンドボックスラッパーコードを生成
-    wrapper = f'''\
-import sys
-import resource
-
-# リソース制限 (Unix系のみ)
-try:
-    # CPU時間制限
-    resource.setrlimit(resource.RLIMIT_CPU, ({timeout}, {timeout}))
-    # メモリ制限 (256MB)
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
-    # ファイル生成サイズ制限 (1MB)
-    resource.setrlimit(resource.RLIMIT_FSIZE, (1 * 1024 * 1024, 1 * 1024 * 1024))
-    # プロセス数制限
-    resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
-except (ValueError, AttributeError):
-    pass  # Windows等で resource が使えない場合はスキップ
-
-# 標準入力を閉じる
-sys.stdin = open("/dev/null", "r")
-
-# ユーザーコード実行
-'''
-    wrapper += code
-
-    tmp_dir = None
-    try:
-        tmp_dir = tempfile.mkdtemp(prefix="codex_sandbox_")
-        script_path = os.path.join(tmp_dir, "sandbox_script.py")
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(wrapper)
-
-        # サブプロセスで実行（環境変数を最小限に制限）
-        env = {
-            "PATH": "/usr/bin:/usr/local/bin:/bin",
-            "HOME": tmp_dir,
-            "TMPDIR": tmp_dir,
-            "LANG": "en_US.UTF-8",
-        }
-
-        result = subprocess.run(
-            [sys.executable, "-u", script_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=tmp_dir,
-            env=env,
-        )
-
-        output_parts = []
-        if result.stdout:
-            stdout = result.stdout
-            if len(stdout) > 50_000:
-                stdout = stdout[:50_000] + f"\n[...truncated, total {len(result.stdout)} chars]"
-            output_parts.append(stdout)
-        if result.stderr:
-            stderr = result.stderr
-            if len(stderr) > 10_000:
-                stderr = stderr[:10_000] + f"\n[...truncated]"
-            output_parts.append(f"[stderr]\n{stderr}")
-        output_parts.append(f"[exit code: {result.returncode}]")
-        return "\n".join(output_parts)
-
-    except subprocess.TimeoutExpired:
-        return f"[sandbox error] 実行がタイムアウトしました（{timeout}秒）"
-    except Exception as e:
-        return f"[sandbox error] {e}"
-    finally:
-        # 一時ディレクトリのクリーンアップ
-        if tmp_dir:
-            try:
-                import shutil
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-
 
 def _human_size(size: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -1252,7 +1120,6 @@ TOOL_FUNCTIONS = {
     "search_files": tool_search_files,
     "grep": tool_grep,
     "get_file_info": tool_get_file_info,
-    "run_python_sandbox": tool_run_python_sandbox,
     "run_skill": tool_run_skill,
     "think": tool_think,
 }
