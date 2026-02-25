@@ -514,10 +514,6 @@ TOOLS = [
                         "type": "string",
                         "description": "コマンドを実行するディレクトリ（省略時は作業ディレクトリ）",
                     },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "タイムアウト秒数（省略時は設定値）",
-                    },
                 },
                 "required": ["command"],
             },
@@ -710,10 +706,6 @@ TOOLS = [
                         "type": "string",
                         "description": "実行するPythonコード",
                     },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "タイムアウト秒数（省略時は120秒、最大120秒）",
-                    },
                 },
                 "required": ["code"],
             },
@@ -773,10 +765,9 @@ def _resolve_path(path: str) -> str:
 
 
 def tool_run_command(
-    command: str, cwd: Optional[str] = None, timeout: Optional[int] = None
+    command: str, cwd: Optional[str] = None, **kwargs
 ) -> str:
-    if timeout is None:
-        timeout = _ACTIVE_CONFIG.get("timeout", 120)
+    timeout = _ACTIVE_CONFIG.get("timeout", 120)
     work_dir = _resolve_path(cwd) if cwd else None
     try:
         result = subprocess.run(
@@ -1080,19 +1071,16 @@ def tool_get_file_info(path: str) -> str:
         return f"[error] {e}"
 
 
-def tool_run_python_sandbox(code: str, timeout: Optional[int] = None) -> str:
+def tool_run_python_sandbox(code: str, **kwargs) -> str:
     """Pythonコードをサンドボックス環境で実行する。
 
     制限:
-    - タイムアウト（デフォルト120秒、最大120秒）
+    - タイムアウトは設定値を使用（デフォルト120秒）
     - ネットワークアクセス不可（import制限による簡易ブロック）
     - ファイル書き込み不可（一時ディレクトリ内のみ許可）
     - 危険なモジュールの import を禁止
     """
-    if timeout is None:
-        timeout = min(_ACTIVE_CONFIG.get("timeout", 120), 120)
-    else:
-        timeout = min(timeout, 120)
+    timeout = _ACTIVE_CONFIG.get("timeout", 120)
 
     # 危険な import / 操作をチェック
     forbidden_patterns = [
