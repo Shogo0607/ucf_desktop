@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 xlsb ファイルを読み込み、内容を表示するツール。
-デフォルトではヘッダーは8行目・B列から開始し、8〜11行目の4行で
+デフォルトではヘッダーは9行目・B列から開始し、9〜11行目の3行で
 マルチ行ヘッダー（結合セル対応）を構成する前提。
 --header-row / --header-rows / --start-col で変更可能。
 
@@ -33,9 +33,9 @@ import pandas as pd
 from pyxlsb import open_workbook
 
 
-# デフォルトのヘッダー開始位置（8行目 = index 7, B列 = index 1）
-DEFAULT_HEADER_ROW = 7
-DEFAULT_HEADER_ROWS = 4  # 8〜11行目の4行でヘッダーを構成
+# デフォルトのヘッダー開始位置（9行目 = index 8, B列 = index 1）
+DEFAULT_HEADER_ROW = 8
+DEFAULT_HEADER_ROWS = 3  # 9〜11行目の3行でヘッダーを構成
 DEFAULT_START_COL = 1
 
 
@@ -269,12 +269,12 @@ def main():
     parser.add_argument("--sheet", default=None, help="シート名（省略時は最初のシート）")
     parser.add_argument("--limit", type=int, default=50, help="表示行数（read コマンド用、デフォルト: 50）")
     parser.add_argument(
-        "--header-row", type=int, default=8,
-        help="ヘッダー開始行番号（1-indexed、デフォルト: 8）",
+        "--header-row", type=int, default=9,
+        help="ヘッダー開始行番号（1-indexed、デフォルト: 9）",
     )
     parser.add_argument(
-        "--header-rows", type=int, default=4,
-        help="ヘッダーを構成する行数（デフォルト: 4、つまり8〜11行目）",
+        "--header-rows", type=int, default=3,
+        help="ヘッダーを構成する行数（デフォルト: 3、つまり9〜11行目）",
     )
     parser.add_argument(
         "--start-col", default="B",

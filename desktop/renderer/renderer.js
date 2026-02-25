@@ -107,14 +107,29 @@ function appendToolCall(name, args) {
 
   const argsStr = JSON.stringify(args, null, 2);
   const card = document.createElement('div');
-  card.className = 'tool-card';
+  card.className = 'tool-card running';
   card.dataset.toolName = name;
+
+  // run_command の場合はコマンド内容を表示
+  const cmdPreview = (name === 'run_command' && args && args.command)
+    ? args.command
+    : '';
+  const statusHtml = cmdPreview
+    ? '<div class="tool-card-status">' +
+        '<span class="tool-card-status-label">実行中:</span>' +
+        '<span class="tool-card-status-cmd">' + escHtml(cmdPreview) + '</span>' +
+      '</div>'
+    : '<div class="tool-card-status">' +
+        '<span class="tool-card-status-label">実行中...</span>' +
+      '</div>';
 
   card.innerHTML =
     '<div class="tool-card-header">' +
       '<span class="icon">&#9889;</span>' +
       '<span>' + escHtml(name) + '</span>' +
+      '<span class="tool-card-spinner"></span>' +
     '</div>' +
+    statusHtml +
     '<div class="tool-card-args">' +
       escHtml(argsStr.length > 300 ? argsStr.slice(0, 300) + '...' : argsStr) +
     '</div>';
@@ -130,6 +145,7 @@ function appendToolResult(name, result, status) {
   const card = idx >= 0 ? pendingToolCards.splice(idx, 1)[0] : null;
 
   if (card) {
+    card.classList.remove('running');
     card.classList.add('result-' + status);
     const icon = status === 'ok' ? '\u2713' : status === 'error' ? '\u2717' : '\u2013';
     const headerEl = card.querySelector('.tool-card-header');

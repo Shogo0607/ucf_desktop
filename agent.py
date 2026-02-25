@@ -162,7 +162,7 @@ _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
 DEFAULT_CONFIG = {
     "model": "gpt-4.1-mini",
-    "timeout": 30,
+    "timeout": 120,
     "auto_confirm": False,
     "max_context_messages": 200,
     "compact_keep_recent": 10,
@@ -761,7 +761,7 @@ def tool_run_command(
     command: str, cwd: Optional[str] = None, timeout: Optional[int] = None
 ) -> str:
     if timeout is None:
-        timeout = _ACTIVE_CONFIG.get("timeout", 30)
+        timeout = _ACTIVE_CONFIG.get("timeout", 120)
     work_dir = _resolve_path(cwd) if cwd else None
     try:
         result = subprocess.run(
@@ -771,6 +771,7 @@ def tool_run_command(
             text=True,
             timeout=timeout,
             cwd=work_dir,
+            stdin=subprocess.DEVNULL,
         )
         output_parts = []
         if result.stdout:
