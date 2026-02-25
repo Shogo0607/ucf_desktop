@@ -1,5 +1,5 @@
 {
-  "model": "gpt-4.1-mini",
+  "model": "gpt-5.2",
   "timeout": 120,
   "auto_confirm": false,
   "max_context_messages": 200,
