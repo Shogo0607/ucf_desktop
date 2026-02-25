@@ -769,6 +769,8 @@ def tool_run_command(
             shell=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             cwd=work_dir,
             stdin=subprocess.DEVNULL,
