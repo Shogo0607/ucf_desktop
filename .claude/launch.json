@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "renderer-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "desktop/renderer", "-l", "3999", "--no-clipboard"],
+      "port": 3999
+    },
+    {
+      "name": "web-mode",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "agent.py", "--web", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

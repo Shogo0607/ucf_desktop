@@ -844,3 +844,12 @@ body {
   font-size: 13px;
   color: var(--text-secondary);
 }
+
+/* ── Web mode ──────────────────────────────────────────── */
+body.web-mode #sidebar {
+  padding-top: 16px;
+  -webkit-app-region: unset;
+}
+body.web-mode #sidebar-actions {
+  -webkit-app-region: unset;
+}

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:">
   <title>ucf_desktop</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -60,6 +60,11 @@
   </div>
 
   <script src="marked.umd.js"></script>
+  <script>
+    if (typeof window.agent === 'undefined') {
+      document.write('<script src="web-agent.js"><\/script>');
+    }
+  </script>
   <script src="renderer.js"></script>
 </body>
 </html>

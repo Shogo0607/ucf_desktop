@@ -2266,7 +2266,22 @@ def main():
     parser = argparse.ArgumentParser(description="ucf_desktop agent")
     parser.add_argument("--gui", action="store_true",
                         help="Electron GUI モードで起動 (stdio JSON Lines)")
+    parser.add_argument("--web", action="store_true",
+                        help="Web アプリモードで起動 (ブラウザで使用)")
+    parser.add_argument("--port", type=int, default=8765,
+                        help="Web モードのポート番号 (デフォルト: 8765)")
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Web モードのホスト (デフォルト: 127.0.0.1)")
     args = parser.parse_args()
+
+    if args.web:
+        os.environ["UCF_WEB_HOST"] = args.host
+        os.environ["UCF_WEB_PORT"] = str(args.port)
+        from web_server import create_app
+        from aiohttp import web as aio_web
+        print(f"ucf_desktop web mode: http://{args.host}:{args.port}")
+        aio_web.run_app(create_app(), host=args.host, port=args.port, print=None)
+        return
 
     if args.gui:
         gui_main()
