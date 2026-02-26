@@ -24,7 +24,7 @@ import sys
 import time
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -206,6 +206,80 @@ def _save_config(config: dict) -> None:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────
+# 会話永続化
+# ─────────────────────────────────────────────
+
+_CONVERSATIONS_DIR = _CONFIG_DIR / "conversations"
+
+
+def _generate_conv_id() -> str:
+    return "conv_" + uuid.uuid4().hex[:12]
+
+
+def _save_conversation(conv_id: str, title: str, messages: list,
+                       created_at: str, ui_html: str = "") -> None:
+    """会話を .ucf_desktop/conversations/{id}.json に保存する。"""
+    _CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
+    save_msgs = [m for m in messages if m.get("role") != "system"]
+    data = {
+        "id": conv_id,
+        "title": title,
+        "created_at": created_at,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "messages": save_msgs,
+        "ui_html": ui_html,
+    }
+    filepath = _CONVERSATIONS_DIR / f"{conv_id}.json"
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_conversation(conv_id: str) -> dict | None:
+    filepath = _CONVERSATIONS_DIR / f"{conv_id}.json"
+    if not filepath.exists():
+        return None
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _list_conversations() -> list[dict]:
+    """メタデータ一覧を updated_at 降順で返す。"""
+    if not _CONVERSATIONS_DIR.exists():
+        return []
+    convs = []
+    for f in _CONVERSATIONS_DIR.glob("conv_*.json"):
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            convs.append({
+                "id": data["id"],
+                "title": data.get("title", ""),
+                "created_at": data.get("created_at", ""),
+                "updated_at": data.get("updated_at", ""),
+            })
+        except Exception:
+            continue
+    convs.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+    return convs
+
+
+def _delete_conversation(conv_id: str) -> bool:
+    filepath = _CONVERSATIONS_DIR / f"{conv_id}.json"
+    if filepath.exists():
+        filepath.unlink()
+        return True
+    return False
+
+
+def _auto_title_from_message(content: str) -> str:
+    """最初のユーザーメッセージからタイトルを自動生成する。"""
+    title = content.strip().replace("\n", " ")
+    if len(title) > 40:
+        title = title[:40] + "..."
+    return title
 
 
 # ─────────────────────────────────────────────
@@ -2232,6 +2306,14 @@ def gui_main():
     system_prompt = _build_system_prompt(config, project_context, disabled_skills)
     messages: list = [{"role": "system", "content": system_prompt}]
 
+    # 会話状態トラッキング (ミュータブル dict でクロージャからアクセス可能に)
+    conv_state = {
+        "id": _generate_conv_id(),
+        "title": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "has_content": False,
+    }
+
     def _rebuild_system_prompt():
         """disabled_skills 変更後にシステムプロンプトを再構築する。"""
         new_prompt = _build_system_prompt(config, project_context, disabled_skills)
@@ -2249,6 +2331,8 @@ def gui_main():
             _skill_registry.skill_to_dict(s)
             for s in _skill_registry.list_skills()
         ],
+        "conversation_id": conv_state["id"],
+        "conversations": _list_conversations(),
     })
 
     # stdin 読み取りループ（メインスレッド）
@@ -2274,6 +2358,11 @@ def gui_main():
             if _chat_in_progress.is_set():
                 _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
                 continue
+
+            # 会話タイトル自動設定 (初回ユーザーメッセージから)
+            if not conv_state["title"]:
+                conv_state["title"] = _auto_title_from_message(content)
+            conv_state["has_content"] = True
 
             # RAG フォルダが指定されている場合、コンテキストに追加
             rag_folders = msg.get("rag_folders", [])
@@ -2325,7 +2414,17 @@ def gui_main():
                         msgs.pop()
                 finally:
                     _chat_in_progress.clear()
-                    _emit({"type": "chat_finished"})
+                    # 会話自動保存
+                    if conv_state["has_content"]:
+                        try:
+                            _save_conversation(
+                                conv_state["id"], conv_state["title"],
+                                messages, conv_state["created_at"]
+                            )
+                        except Exception:
+                            pass
+                    _emit({"type": "chat_finished",
+                           "conversation_id": conv_state["id"]})
 
             t = threading.Thread(target=_run_chat, daemon=True)
             t.start()
@@ -2419,11 +2518,144 @@ def gui_main():
                                 _emit({"type": "error", "message": str(e)})
                             finally:
                                 _chat_in_progress.clear()
-                                _emit({"type": "chat_finished"})
+                                if conv_state["has_content"]:
+                                    try:
+                                        _save_conversation(
+                                            conv_state["id"], conv_state["title"],
+                                            messages, conv_state["created_at"]
+                                        )
+                                    except Exception:
+                                        pass
+                                _emit({"type": "chat_finished",
+                                       "conversation_id": conv_state["id"]})
 
                         t = threading.Thread(target=_run_skill_chat, daemon=True)
                         t.start()
 
+            # ── 会話管理コマンド ──
+            elif cmd_name == "new_conversation":
+                if _chat_in_progress.is_set():
+                    _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
+                    continue
+                # 現在の会話を保存
+                if conv_state["has_content"]:
+                    ui_html = ""
+                    if isinstance(cmd_args, dict):
+                        ui_html = cmd_args.get("ui_html", "")
+                    _save_conversation(
+                        conv_state["id"], conv_state["title"],
+                        messages, conv_state["created_at"], ui_html
+                    )
+                # 新しい会話を開始
+                conv_state["id"] = _generate_conv_id()
+                conv_state["title"] = ""
+                conv_state["created_at"] = datetime.now(timezone.utc).isoformat()
+                conv_state["has_content"] = False
+                system_msg = messages[0]
+                messages.clear()
+                messages.append(system_msg)
+                _emit({"type": "conversation_new",
+                       "conversation_id": conv_state["id"]})
+                _emit({"type": "conversations_list",
+                       "conversations": _list_conversations()})
+
+            elif cmd_name == "switch_conversation":
+                if _chat_in_progress.is_set():
+                    _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
+                    continue
+                target_id = ""
+                current_ui_html = ""
+                if isinstance(cmd_args, dict):
+                    target_id = cmd_args.get("id", "")
+                    current_ui_html = cmd_args.get("ui_html", "")
+                else:
+                    target_id = str(cmd_args).strip()
+                if not target_id:
+                    continue
+                # 現在の会話を保存
+                if conv_state["has_content"]:
+                    _save_conversation(
+                        conv_state["id"], conv_state["title"],
+                        messages, conv_state["created_at"], current_ui_html
+                    )
+                # 対象の会話を読み込み
+                conv_data = _load_conversation(target_id)
+                if conv_data is None:
+                    _emit({"type": "error",
+                           "message": f"会話 {target_id} が見つかりません"})
+                    continue
+                conv_state["id"] = target_id
+                conv_state["title"] = conv_data.get("title", "")
+                conv_state["created_at"] = conv_data.get("created_at", "")
+                conv_state["has_content"] = True
+                # messages 復元: system を再生成 + 保存済みメッセージ
+                _rebuild_system_prompt()
+                system_msg = messages[0]
+                messages.clear()
+                messages.append(system_msg)
+                messages.extend(conv_data.get("messages", []))
+                _emit({
+                    "type": "conversation_switched",
+                    "conversation_id": target_id,
+                    "title": conv_state["title"],
+                    "ui_html": conv_data.get("ui_html", ""),
+                })
+                _emit({"type": "conversations_list",
+                       "conversations": _list_conversations()})
+
+            elif cmd_name == "list_conversations":
+                _emit({"type": "conversations_list",
+                       "conversations": _list_conversations()})
+
+            elif cmd_name == "delete_conversation":
+                target_id = ""
+                if isinstance(cmd_args, dict):
+                    target_id = cmd_args.get("id", "")
+                else:
+                    target_id = str(cmd_args).strip()
+                if target_id == conv_state["id"]:
+                    _emit({"type": "error",
+                           "message": "現在の会話は削除できません"})
+                    continue
+                if _delete_conversation(target_id):
+                    _emit({"type": "conversation_deleted",
+                           "conversation_id": target_id})
+                    _emit({"type": "conversations_list",
+                           "conversations": _list_conversations()})
+                else:
+                    _emit({"type": "error",
+                           "message": f"会話 {target_id} が見つかりません"})
+
+            elif cmd_name == "rename_conversation":
+                if not isinstance(cmd_args, dict):
+                    continue
+                target_id = cmd_args.get("id", "")
+                new_title = cmd_args.get("title", "")
+                if not target_id or not new_title:
+                    continue
+                if target_id == conv_state["id"]:
+                    conv_state["title"] = new_title
+                conv_data = _load_conversation(target_id)
+                if conv_data:
+                    conv_data["title"] = new_title
+                    filepath = _CONVERSATIONS_DIR / f"{target_id}.json"
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        json.dump(conv_data, f, ensure_ascii=False, indent=2)
+                _emit({"type": "conversation_renamed",
+                       "conversation_id": target_id, "title": new_title})
+                _emit({"type": "conversations_list",
+                       "conversations": _list_conversations()})
+
+            elif cmd_name == "save_conversation_html":
+                if isinstance(cmd_args, dict) and conv_state["has_content"]:
+                    ui_html = cmd_args.get("ui_html", "")
+                    try:
+                        _save_conversation(
+                            conv_state["id"], conv_state["title"],
+                            messages, conv_state["created_at"], ui_html
+                        )
+                    except Exception:
+                        pass
 
 
 # ─────────────────────────────────────────────

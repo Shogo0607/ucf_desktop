@@ -1,16 +1,42 @@
-// ── State ──────────────────────────────────────────────────────
-const state = {
+// ── Per-conversation state ─────────────────────────────────────
+const conversations = new Map(); // convId -> ConversationState
+
+function createConversationState(id, title) {
+  const el = document.createElement('div');
+  el.className = 'conversation-messages';
+  el.dataset.convId = id;
+  return {
+    id: id,
+    el: el,
+    title: title || '',
+    currentAssistantEl: null,
+    currentAssistantRaw: '',
+    pendingToolCards: [],
+  };
+}
+
+// ── Global state ──────────────────────────────────────────────
+const globalState = {
   isConnected: false,
   isBusy: false,
   autoConfirm: false,
-  currentAssistantEl: null,
-  currentAssistantRaw: '',   // Raw markdown text accumulator
   disabledSkills: new Set(),
-  ragFolders: [],            // Extra RAG folders (absolute paths)
+  ragFolders: [],
+  backendConvId: null,    // Which conv the backend is processing
+  activeConvId: null,     // Which conv is currently displayed
+  pendingSwitchId: null,  // Queued switch when busy
 };
 
+function getBackendConv() {
+  return conversations.get(globalState.backendConvId) || null;
+}
+
+function getActiveConv() {
+  return conversations.get(globalState.activeConvId) || null;
+}
+
 // ── DOM refs ───────────────────────────────────────────────────
-const messagesEl   = document.getElementById('messages');
+const messagesContainer = document.getElementById('messages-container');
 const inputEl      = document.getElementById('user-input');
 const sendBtn      = document.getElementById('send-btn');
 const statusConn   = document.getElementById('status-conn');
@@ -22,57 +48,114 @@ const skillsListEl = document.getElementById('skills-list');
 const btnSkillsReload = document.getElementById('btn-skills-reload');
 const ragFoldersEl = document.getElementById('rag-folders');
 const btnAddFolder = document.getElementById('btn-add-folder');
+const btnNewConv   = document.getElementById('btn-new-conv');
+const convListEl   = document.getElementById('conv-list');
 
-// ── Tool card queue (FIFO for matching tool_call -> tool_result) ──
-const pendingToolCards = [];
+// ── Conversation management ────────────────────────────────────
+
+function ensureConversation(convId, title) {
+  if (!conversations.has(convId)) {
+    const convState = createConversationState(convId, title);
+    conversations.set(convId, convState);
+    messagesContainer.appendChild(convState.el);
+    convState.el.style.display = 'none';
+  }
+  return conversations.get(convId);
+}
+
+function showConversation(convId) {
+  for (const [id, conv] of conversations) {
+    conv.el.style.display = (id === convId) ? 'block' : 'none';
+  }
+  globalState.activeConvId = convId;
+  updateConversationListHighlight();
+}
+
+function switchConversation(convId) {
+  if (convId === globalState.activeConvId && convId === globalState.backendConvId) {
+    return;
+  }
+
+  if (globalState.isBusy) {
+    // Visual-only switch while agent is busy
+    showConversation(convId);
+    if (convId === globalState.backendConvId) {
+      // Switching back to the conversation being processed
+      globalState.pendingSwitchId = null;
+      disableInputWithMessage('処理中...');
+    } else {
+      globalState.pendingSwitchId = convId;
+      disableInputWithMessage('処理完了後に送信できます');
+    }
+    return;
+  }
+
+  // Full switch: visual + backend
+  showConversation(convId);
+
+  // Save current UI HTML before switching
+  var currentConv = conversations.get(globalState.backendConvId);
+  var currentHtml = currentConv ? currentConv.el.innerHTML : '';
+
+  // Tell backend to switch
+  window.agent.sendCommand('switch_conversation', {
+    id: convId,
+    ui_html: currentHtml,
+  });
+
+  globalState.backendConvId = convId;
+}
 
 // ── Message rendering ──────────────────────────────────────────
 
 function appendUserMessage(content) {
-  const group = document.createElement('div');
+  var conv = getBackendConv();
+  if (!conv) return;
+  var group = document.createElement('div');
   group.className = 'message-group message-user';
-  const bubble = document.createElement('div');
+  var bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = content;
   group.appendChild(bubble);
-  messagesEl.appendChild(group);
-  scrollToBottom();
+  conv.el.appendChild(group);
+  scrollToBottomIfActive();
 }
 
 function startAssistantMessage() {
-  const group = document.createElement('div');
+  var conv = getBackendConv();
+  if (!conv) return null;
+  var group = document.createElement('div');
   group.className = 'message-group message-assistant';
-  const bubble = document.createElement('div');
+  var bubble = document.createElement('div');
   bubble.className = 'bubble streaming-cursor';
   group.appendChild(bubble);
-  messagesEl.appendChild(group);
-  state.currentAssistantEl = bubble;
-  state.currentAssistantRaw = '';
-  scrollToBottom();
+  conv.el.appendChild(group);
+  conv.currentAssistantEl = bubble;
+  conv.currentAssistantRaw = '';
+  scrollToBottomIfActive();
   return bubble;
 }
 
 function appendToken(content) {
-  if (!state.currentAssistantEl) {
+  var conv = getBackendConv();
+  if (!conv) return;
+  if (!conv.currentAssistantEl) {
     startAssistantMessage();
   }
-  // Accumulate raw markdown
-  state.currentAssistantRaw += content;
-  // Render markdown incrementally (innerHTML with parsed markdown)
-  state.currentAssistantEl.innerHTML = renderMarkdown(state.currentAssistantRaw);
-  scrollToBottom();
+  conv.currentAssistantRaw += content;
+  conv.currentAssistantEl.innerHTML = renderMarkdown(conv.currentAssistantRaw);
+  scrollToBottomIfActive();
 }
 
 function finalizeAssistantMessage() {
-  if (state.currentAssistantEl) {
-    // Final render of complete markdown
-    if (state.currentAssistantRaw) {
-      state.currentAssistantEl.innerHTML = renderMarkdown(state.currentAssistantRaw);
-    }
-    state.currentAssistantEl.classList.remove('streaming-cursor');
-    state.currentAssistantEl = null;
-    state.currentAssistantRaw = '';
+  var conv = getBackendConv();
+  if (!conv || !conv.currentAssistantEl) return;
+  if (conv.currentAssistantRaw) {
+    conv.currentAssistantEl.innerHTML = renderMarkdown(conv.currentAssistantRaw);
   }
+  conv.currentAssistantEl.classList.remove('streaming-cursor');
+  conv.currentAssistantEl = null;
+  conv.currentAssistantRaw = '';
 }
 
 // Initialize marked (loaded via <script> tag as UMD global)
@@ -83,11 +166,10 @@ if (typeof marked !== 'undefined') {
 function renderMarkdown(text) {
   if (!text) return '';
   try {
-    let html = marked.parse(text);
-    // 出典カード変換: <!-- sources --> ... <!-- /sources --> ブロックを検出
+    var html = marked.parse(text);
     html = html.replace(
       /<!--\s*sources\s*-->([\s\S]*?)<!--\s*\/sources\s*-->/g,
-      (_, inner) => {
+      function(_, inner) {
         return '<div class="source-card">' +
           '<div class="source-card-title"><span>&#128269;</span> 参照元</div>' +
           inner +
@@ -96,25 +178,25 @@ function renderMarkdown(text) {
     );
     return html;
   } catch (e) {
-    // Fallback to escaped plain text
     return escHtml(text).replace(/\n/g, '<br>');
   }
 }
 
 function appendToolCall(name, args) {
-  // Finalize any in-progress assistant text before showing tool card
   finalizeAssistantMessage();
 
-  const argsStr = JSON.stringify(args, null, 2);
-  const card = document.createElement('div');
+  var conv = getBackendConv();
+  if (!conv) return null;
+
+  var argsStr = JSON.stringify(args, null, 2);
+  var card = document.createElement('div');
   card.className = 'tool-card running';
   card.dataset.toolName = name;
 
-  // run_command の場合はコマンド内容を表示
-  const cmdPreview = (name === 'run_command' && args && args.command)
+  var cmdPreview = (name === 'run_command' && args && args.command)
     ? args.command
     : '';
-  const statusHtml = cmdPreview
+  var statusHtml = cmdPreview
     ? '<div class="tool-card-status">' +
         '<span class="tool-card-status-label">実行中:</span>' +
         '<span class="tool-card-status-cmd">' + escHtml(cmdPreview) + '</span>' +
@@ -134,21 +216,24 @@ function appendToolCall(name, args) {
       escHtml(argsStr.length > 300 ? argsStr.slice(0, 300) + '...' : argsStr) +
     '</div>';
 
-  messagesEl.appendChild(card);
-  pendingToolCards.push(card);
-  scrollToBottom();
+  conv.el.appendChild(card);
+  conv.pendingToolCards.push(card);
+  scrollToBottomIfActive();
   return card;
 }
 
 function appendToolResult(name, result, status) {
-  const idx = pendingToolCards.findIndex(c => c.dataset.toolName === name);
-  const card = idx >= 0 ? pendingToolCards.splice(idx, 1)[0] : null;
+  var conv = getBackendConv();
+  if (!conv) return;
+
+  var idx = conv.pendingToolCards.findIndex(function(c) { return c.dataset.toolName === name; });
+  var card = idx >= 0 ? conv.pendingToolCards.splice(idx, 1)[0] : null;
 
   if (card) {
     card.classList.remove('running');
     card.classList.add('result-' + status);
-    const icon = status === 'ok' ? '\u2713' : status === 'error' ? '\u2717' : '\u2013';
-    const headerEl = card.querySelector('.tool-card-header');
+    var icon = status === 'ok' ? '\u2713' : status === 'error' ? '\u2717' : '\u2013';
+    var headerEl = card.querySelector('.tool-card-header');
     headerEl.innerHTML =
       '<span class="icon">' + icon + '</span>' +
       '<span>' + escHtml(name) + '</span>' +
@@ -156,24 +241,26 @@ function appendToolResult(name, result, status) {
         escHtml(status) +
       '</span>';
 
-    const argsEl = card.querySelector('.tool-card-args');
-    const preview = result.length > 150 ? result.slice(0, 150) + '...' : result;
+    var argsEl = card.querySelector('.tool-card-args');
+    var preview = result.length > 150 ? result.slice(0, 150) + '...' : result;
     if (argsEl) argsEl.textContent = preview;
   }
 }
 
 function appendConfirmCard(id, toolName, args, preview) {
-  // Finalize any in-progress assistant text
   finalizeAssistantMessage();
 
-  const card = document.createElement('div');
+  var conv = getBackendConv();
+  if (!conv) return;
+
+  var card = document.createElement('div');
   card.className = 'confirm-card';
   card.dataset.confirmId = id;
 
-  const argsStr = JSON.stringify(args, null, 2);
-  const argsDisplay = argsStr.length > 200 ? argsStr.slice(0, 200) + '...' : argsStr;
+  var argsStr = JSON.stringify(args, null, 2);
+  var argsDisplay = argsStr.length > 200 ? argsStr.slice(0, 200) + '...' : argsStr;
 
-  let html =
+  var html =
     '<div class="confirm-card-title">&#9888; 確認が必要な操作</div>' +
     '<div class="confirm-card-tool">' + escHtml(toolName) + '</div>' +
     '<div class="confirm-card-detail">' + escHtml(argsDisplay) + '</div>';
@@ -190,22 +277,21 @@ function appendConfirmCard(id, toolName, args, preview) {
 
   card.innerHTML = html;
 
-  // Wire up buttons
-  card.querySelector('.confirm-btn-approve').addEventListener('click', () => {
+  card.querySelector('.confirm-btn-approve').addEventListener('click', function() {
     resolveConfirm(card, id, true);
   });
-  card.querySelector('.confirm-btn-cancel').addEventListener('click', () => {
+  card.querySelector('.confirm-btn-cancel').addEventListener('click', function() {
     resolveConfirm(card, id, false);
   });
 
-  messagesEl.appendChild(card);
-  scrollToBottom();
+  conv.el.appendChild(card);
+  scrollToBottomIfActive();
 }
 
 function resolveConfirm(card, id, approved) {
-  card.querySelectorAll('.confirm-btn').forEach(b => { b.disabled = true; });
-  const label = approved ? '承認済み' : 'キャンセル済み';
-  const color = approved ? 'var(--accent-green)' : 'var(--text-dim)';
+  card.querySelectorAll('.confirm-btn').forEach(function(b) { b.disabled = true; });
+  var label = approved ? '承認済み' : 'キャンセル済み';
+  var color = approved ? 'var(--accent-green)' : 'var(--text-dim)';
   card.querySelector('.confirm-buttons').innerHTML =
     '<span style="font-size:12px;color:' + color + '">' + label + '</span>';
 
@@ -214,7 +300,7 @@ function resolveConfirm(card, id, approved) {
 
 function renderDiffPreview(text) {
   if (!text) return '';
-  return text.split('\n').map(line => {
+  return text.split('\n').map(function(line) {
     if (line.startsWith('+') && !line.startsWith('+++'))
       return '<span class="diff-add">' + escHtml(line) + '</span>';
     if (line.startsWith('-') && !line.startsWith('---'))
@@ -226,31 +312,88 @@ function renderDiffPreview(text) {
 }
 
 function appendStatusMessage(text, ephemeral) {
+  var conv = getBackendConv();
+  if (!conv) return;
   removeEphemeralStatus();
-  const el = document.createElement('div');
+  var el = document.createElement('div');
   el.className = 'status-message';
   el.textContent = text;
   if (ephemeral) el.dataset.ephemeral = '1';
-  messagesEl.appendChild(el);
-  scrollToBottom();
+  conv.el.appendChild(el);
+  scrollToBottomIfActive();
 }
 
 function removeEphemeralStatus() {
-  messagesEl.querySelectorAll('.status-message[data-ephemeral="1"]')
-    .forEach(el => el.remove());
+  var conv = getBackendConv();
+  if (!conv) return;
+  conv.el.querySelectorAll('.status-message[data-ephemeral="1"]')
+    .forEach(function(el) { el.remove(); });
 }
 
 function appendErrorMessage(text) {
-  const el = document.createElement('div');
+  var conv = getBackendConv();
+  if (!conv) return;
+  var el = document.createElement('div');
   el.className = 'error-message';
   el.textContent = text;
-  messagesEl.appendChild(el);
-  scrollToBottom();
+  conv.el.appendChild(el);
+  scrollToBottomIfActive();
+}
+
+// ── Conversation list UI ────────────────────────────────────────
+
+function renderConversationList(convList) {
+  convListEl.innerHTML = '';
+  if (!convList || convList.length === 0) return;
+
+  convList.forEach(function(conv) {
+    var item = document.createElement('div');
+    item.className = 'conv-item' +
+      (conv.id === globalState.activeConvId ? ' conv-item-active' : '');
+    item.dataset.convId = conv.id;
+
+    var titleSpan = document.createElement('span');
+    titleSpan.className = 'conv-item-title';
+    titleSpan.textContent = conv.title || '新しい会話';
+    titleSpan.title = conv.title || '';
+
+    var deleteBtn = document.createElement('button');
+    deleteBtn.className = 'conv-item-delete';
+    deleteBtn.innerHTML = '&times;';
+    deleteBtn.title = '削除';
+    deleteBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (conv.id === globalState.backendConvId) return;
+      if (confirm('この会話を削除しますか？')) {
+        window.agent.sendCommand('delete_conversation', conv.id);
+      }
+    });
+
+    item.appendChild(titleSpan);
+    item.appendChild(deleteBtn);
+
+    item.addEventListener('click', function() {
+      switchConversation(conv.id);
+    });
+
+    convListEl.appendChild(item);
+  });
+}
+
+function updateConversationListHighlight() {
+  var items = convListEl.querySelectorAll('.conv-item');
+  items.forEach(function(item) {
+    if (item.dataset.convId === globalState.activeConvId) {
+      item.classList.add('conv-item-active');
+    } else {
+      item.classList.remove('conv-item-active');
+    }
+  });
 }
 
 // ── Incoming message handler ───────────────────────────────────
 
-window.agent.onMessage((msg) => {
+window.agent.onMessage(function(msg) {
   switch (msg.type) {
 
     case 'system_info':
@@ -258,9 +401,19 @@ window.agent.onMessage((msg) => {
       statusCwd.textContent = 'cwd: ' + msg.cwd;
       statusConn.textContent = '接続済み';
       statusConn.className = 'status-ready';
-      state.isConnected = true;
+      globalState.isConnected = true;
       if (msg.disabled_skills) {
-        state.disabledSkills = new Set(msg.disabled_skills);
+        globalState.disabledSkills = new Set(msg.disabled_skills);
+      }
+      // Initialize first conversation
+      if (msg.conversation_id) {
+        ensureConversation(msg.conversation_id, '');
+        showConversation(msg.conversation_id);
+        globalState.backendConvId = msg.conversation_id;
+        globalState.activeConvId = msg.conversation_id;
+      }
+      if (msg.conversations) {
+        renderConversationList(msg.conversations);
       }
       enableInput();
       if (msg.has_context) {
@@ -278,9 +431,9 @@ window.agent.onMessage((msg) => {
 
     case 'skill_toggled':
       if (msg.enabled) {
-        state.disabledSkills.delete(msg.name);
+        globalState.disabledSkills.delete(msg.name);
       } else {
-        state.disabledSkills.add(msg.name);
+        globalState.disabledSkills.add(msg.name);
       }
       updateSkillToggleUI(msg.name, msg.enabled);
       break;
@@ -319,10 +472,25 @@ window.agent.onMessage((msg) => {
     case 'chat_finished':
       removeEphemeralStatus();
       finalizeAssistantMessage();
-      if (state.isBusy) {
+      if (globalState.isBusy) {
         setStatus('ready');
         setBusy(false);
       }
+      // Save current conversation HTML
+      var finishedConv = getBackendConv();
+      if (finishedConv) {
+        window.agent.sendCommand('save_conversation_html', {
+          ui_html: finishedConv.el.innerHTML,
+        });
+      }
+      // Execute queued conversation switch
+      if (globalState.pendingSwitchId) {
+        var targetId = globalState.pendingSwitchId;
+        globalState.pendingSwitchId = null;
+        switchConversation(targetId);
+      }
+      // Request updated conversation list
+      window.agent.sendCommand('list_conversations');
       break;
 
     case 'compacting':
@@ -345,18 +513,58 @@ window.agent.onMessage((msg) => {
       setStatus('error');
       setBusy(false);
       break;
+
+    // ── Conversation events ──
+    case 'conversation_new':
+      ensureConversation(msg.conversation_id, '');
+      showConversation(msg.conversation_id);
+      globalState.backendConvId = msg.conversation_id;
+      globalState.pendingSwitchId = null;
+      enableInput();
+      break;
+
+    case 'conversation_switched':
+      var switchedConv = ensureConversation(msg.conversation_id, msg.title);
+      if (msg.ui_html && switchedConv.el.children.length === 0) {
+        switchedConv.el.innerHTML = msg.ui_html;
+      }
+      showConversation(msg.conversation_id);
+      globalState.backendConvId = msg.conversation_id;
+      globalState.pendingSwitchId = null;
+      enableInput();
+      scrollToBottom();
+      break;
+
+    case 'conversations_list':
+      renderConversationList(msg.conversations);
+      break;
+
+    case 'conversation_deleted':
+      var delConv = conversations.get(msg.conversation_id);
+      if (delConv) {
+        delConv.el.remove();
+        conversations.delete(msg.conversation_id);
+      }
+      break;
+
+    case 'conversation_renamed':
+      var renConv = conversations.get(msg.conversation_id);
+      if (renConv) renConv.title = msg.title;
+      break;
   }
 });
 
 // ── Sending messages ───────────────────────────────────────────
 
 function sendMessage() {
-  const content = inputEl.value.trim();
-  if (!content || state.isBusy || !state.isConnected) return;
+  var content = inputEl.value.trim();
+  if (!content || globalState.isBusy || !globalState.isConnected) return;
 
-  // Show folder info in user message if folders are attached
-  if (state.ragFolders.length > 0) {
-    const folderNames = state.ragFolders.map(f => f.split('/').pop() || f);
+  // Can only send if active conv matches backend conv
+  if (globalState.activeConvId !== globalState.backendConvId) return;
+
+  if (globalState.ragFolders.length > 0) {
+    var folderNames = globalState.ragFolders.map(function(f) { return f.split('/').pop() || f; });
     appendUserMessage(content + '\n[RAG folders: ' + folderNames.join(', ') + ']');
   } else {
     appendUserMessage(content);
@@ -367,8 +575,8 @@ function sendMessage() {
   setBusy(true);
   setStatus('busy');
 
-  if (state.ragFolders.length > 0) {
-    window.agent.sendMessageWithFolders(content, state.ragFolders);
+  if (globalState.ragFolders.length > 0) {
+    window.agent.sendMessageWithFolders(content, globalState.ragFolders);
   } else {
     window.agent.sendMessage(content);
   }
@@ -376,7 +584,7 @@ function sendMessage() {
 
 // ── Input handling ─────────────────────────────────────────────
 
-inputEl.addEventListener('keydown', (e) => {
+inputEl.addEventListener('keydown', function(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
@@ -393,32 +601,31 @@ function autoResizeInput() {
 
 // ── RAG folder management ──────────────────────────────────────
 
-btnAddFolder.addEventListener('click', async () => {
-  const folderPath = await window.agent.selectFolder();
+btnAddFolder.addEventListener('click', async function() {
+  var folderPath = await window.agent.selectFolder();
   if (!folderPath) return;
-  // Avoid duplicates
-  if (state.ragFolders.includes(folderPath)) return;
-  state.ragFolders.push(folderPath);
+  if (globalState.ragFolders.includes(folderPath)) return;
+  globalState.ragFolders.push(folderPath);
   renderRagFolders();
 });
 
 function renderRagFolders() {
   ragFoldersEl.innerHTML = '';
-  if (state.ragFolders.length === 0) {
+  if (globalState.ragFolders.length === 0) {
     ragFoldersEl.classList.add('hidden');
     return;
   }
   ragFoldersEl.classList.remove('hidden');
-  state.ragFolders.forEach((folder, idx) => {
-    const chip = document.createElement('span');
+  globalState.ragFolders.forEach(function(folder, idx) {
+    var chip = document.createElement('span');
     chip.className = 'rag-folder-chip';
-    const name = folder.split('/').pop() || folder;
+    var name = folder.split('/').pop() || folder;
     chip.innerHTML =
       '<span class="rag-folder-icon">&#128193;</span>' +
       '<span class="rag-folder-name" title="' + escHtml(folder) + '">' + escHtml(name) + '</span>' +
       '<button class="rag-folder-remove" title="削除">&times;</button>';
-    chip.querySelector('.rag-folder-remove').addEventListener('click', () => {
-      state.ragFolders.splice(idx, 1);
+    chip.querySelector('.rag-folder-remove').addEventListener('click', function() {
+      globalState.ragFolders.splice(idx, 1);
       renderRagFolders();
     });
     ragFoldersEl.appendChild(chip);
@@ -427,24 +634,34 @@ function renderRagFolders() {
 
 // ── Sidebar buttons ────────────────────────────────────────────
 
-btnClear.addEventListener('click', () => {
-  messagesEl.innerHTML = '';
-  pendingToolCards.length = 0;
-  state.currentAssistantEl = null;
+btnNewConv.addEventListener('click', function() {
+  if (globalState.isBusy) return;
+  var currentConv = getBackendConv();
+  var currentHtml = currentConv ? currentConv.el.innerHTML : '';
+  window.agent.sendCommand('new_conversation', { ui_html: currentHtml });
+});
+
+btnClear.addEventListener('click', function() {
+  var conv = getActiveConv();
+  if (!conv) return;
+  conv.el.innerHTML = '';
+  conv.pendingToolCards.length = 0;
+  conv.currentAssistantEl = null;
+  conv.currentAssistantRaw = '';
   window.agent.sendCommand('clear');
 });
 
-btnAutoconf.addEventListener('click', () => {
-  state.autoConfirm = !state.autoConfirm;
-  btnAutoconf.textContent = '自動確認: ' + (state.autoConfirm ? 'ON' : 'OFF');
-  btnAutoconf.style.color = state.autoConfirm
+btnAutoconf.addEventListener('click', function() {
+  globalState.autoConfirm = !globalState.autoConfirm;
+  btnAutoconf.textContent = '自動確認: ' + (globalState.autoConfirm ? 'ON' : 'OFF');
+  btnAutoconf.style.color = globalState.autoConfirm
     ? 'var(--accent-red)' : 'var(--text-secondary)';
   window.agent.sendCommand('autoconfirm');
 });
 
 // ── Skills ──────────────────────────────────────────────────────
 
-btnSkillsReload.addEventListener('click', () => {
+btnSkillsReload.addEventListener('click', function() {
   window.agent.sendCommand('skills_reload');
 });
 
@@ -454,39 +671,37 @@ function renderSkillsList(skills) {
     skillsListEl.innerHTML = '<div class="skills-empty">スキルなし</div>';
     return;
   }
-  skills.forEach(skill => {
-    const isDisabled = state.disabledSkills.has(skill.name);
+  skills.forEach(function(skill) {
+    var isDisabled = globalState.disabledSkills.has(skill.name);
 
-    const row = document.createElement('div');
+    var row = document.createElement('div');
     row.className = 'skill-row' + (isDisabled ? ' skill-disabled' : '');
     row.dataset.skillName = skill.name;
 
-    // スキル実行ボタン
-    const btn = document.createElement('button');
+    var btn = document.createElement('button');
     btn.className = 'skill-btn';
     btn.title = skill.description;
-    let badges = '';
+    var badges = '';
     if (skill.has_scripts) badges += ' <span class="skill-badge">S</span>';
     if (skill.has_references) badges += ' <span class="skill-badge">R</span>';
     if (skill.has_assets) badges += ' <span class="skill-badge">A</span>';
     btn.innerHTML =
       '<span class="skill-name">' + escHtml(skill.name) + badges + '</span>';
-    btn.addEventListener('click', () => {
-      if (state.isBusy || isDisabled) return;
+    btn.addEventListener('click', function() {
+      if (globalState.isBusy || isDisabled) return;
       setBusy(true);
       setStatus('busy');
       appendStatusMessage('スキル実行: ' + skill.name);
       window.agent.sendCommand('run_skill', skill.name);
     });
 
-    // トグルスイッチ
-    const toggle = document.createElement('label');
+    var toggle = document.createElement('label');
     toggle.className = 'skill-toggle';
     toggle.title = isDisabled ? '有効にする' : '無効にする';
     toggle.innerHTML =
       '<input type="checkbox"' + (isDisabled ? '' : ' checked') + '>' +
       '<span class="skill-toggle-slider"></span>';
-    toggle.querySelector('input').addEventListener('change', (e) => {
+    toggle.querySelector('input').addEventListener('change', function(e) {
       e.stopPropagation();
       window.agent.sendCommand('toggle_skill', skill.name);
     });
@@ -498,16 +713,16 @@ function renderSkillsList(skills) {
 }
 
 function updateSkillToggleUI(skillName, enabled) {
-  const row = skillsListEl.querySelector('.skill-row[data-skill-name="' + skillName + '"]');
+  var row = skillsListEl.querySelector('.skill-row[data-skill-name="' + skillName + '"]');
   if (!row) return;
   if (enabled) {
     row.classList.remove('skill-disabled');
   } else {
     row.classList.add('skill-disabled');
   }
-  const checkbox = row.querySelector('.skill-toggle input');
+  var checkbox = row.querySelector('.skill-toggle input');
   if (checkbox) checkbox.checked = enabled;
-  const toggleLabel = row.querySelector('.skill-toggle');
+  var toggleLabel = row.querySelector('.skill-toggle');
   if (toggleLabel) toggleLabel.title = enabled ? '無効にする' : '有効にする';
 }
 
@@ -515,7 +730,7 @@ function updateSkillToggleUI(skillName, enabled) {
 
 function showCompactingSpinner() {
   if (document.getElementById('compacting-overlay')) return;
-  const overlay = document.createElement('div');
+  var overlay = document.createElement('div');
   overlay.id = 'compacting-overlay';
   overlay.innerHTML =
     '<div class="compacting-spinner-box">' +
@@ -527,37 +742,32 @@ function showCompactingSpinner() {
 }
 
 function hideCompactingSpinner() {
-  const overlay = document.getElementById('compacting-overlay');
+  var overlay = document.getElementById('compacting-overlay');
   if (overlay) overlay.remove();
 }
 
 // ── PDF progress ────────────────────────────────────────────────
 
 function handlePdfProgress(msg) {
-  const container = document.getElementById('pdf-progress');
-  const label = document.getElementById('pdf-progress-label');
-  const detail = document.getElementById('pdf-progress-detail');
-  const bar = document.getElementById('pdf-progress-bar');
+  var container = document.getElementById('pdf-progress');
+  var label = document.getElementById('pdf-progress-label');
+  var detail = document.getElementById('pdf-progress-detail');
+  var bar = document.getElementById('pdf-progress-bar');
 
   if (msg.status === 'done') {
     container.classList.add('hidden');
     return;
   }
 
-  // Show the progress banner
   container.classList.remove('hidden');
 
-  // File label
-  const fileInfo = msg.total_files > 1
-    ? `[${msg.file_index + 1}/${msg.total_files}] `
+  var fileInfo = msg.total_files > 1
+    ? '[' + (msg.file_index + 1) + '/' + msg.total_files + '] '
     : '';
-  label.textContent = `${fileInfo}${msg.file || 'PDF分析中...'}`;
-
-  // Detail text
+  label.textContent = fileInfo + (msg.file || 'PDF分析中...');
   detail.textContent = msg.detail || '';
 
-  // Progress bar
-  const pct = Math.min(Math.max(msg.percent || 0, 0), 100);
+  var pct = Math.min(Math.max(msg.percent || 0, 0), 100);
   bar.style.width = pct + '%';
 }
 
@@ -572,29 +782,46 @@ function escHtml(str) {
 }
 
 function scrollToBottom() {
-  const container = document.getElementById('chat-container');
-  requestAnimationFrame(() => {
+  var container = document.getElementById('chat-container');
+  requestAnimationFrame(function() {
     container.scrollTop = container.scrollHeight;
   });
+}
+
+function scrollToBottomIfActive() {
+  if (globalState.backendConvId === globalState.activeConvId) {
+    scrollToBottom();
+  }
 }
 
 function enableInput() {
   inputEl.disabled = false;
   sendBtn.disabled = false;
+  inputEl.placeholder = 'メッセージを入力... (Enter で送信, Shift+Enter で改行)';
   inputEl.focus();
 }
 
+function disableInputWithMessage(msg) {
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+  inputEl.placeholder = msg;
+}
+
 function setBusy(busy) {
-  state.isBusy = busy;
+  globalState.isBusy = busy;
   inputEl.disabled = busy;
   sendBtn.disabled = busy;
   if (!busy) {
+    // Restore input if active conv matches backend
+    if (globalState.activeConvId === globalState.backendConvId) {
+      inputEl.placeholder = 'メッセージを入力... (Enter で送信, Shift+Enter で改行)';
+    }
     inputEl.focus();
   }
 }
 
 function setStatus(s) {
-  const labels = {
+  var labels = {
     connecting: '接続中...',
     ready: '準備完了',
     busy: '処理中...',
@@ -603,4 +830,3 @@ function setStatus(s) {
   statusConn.textContent = labels[s] || s;
   statusConn.className = 'status-' + s;
 }
-

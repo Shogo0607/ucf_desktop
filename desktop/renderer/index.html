@@ -11,6 +11,12 @@
   <div id="app">
     <div id="sidebar">
       <div id="logo">ucf_desktop</div>
+      <div id="sidebar-new-conv">
+        <button id="btn-new-conv" class="sidebar-btn sidebar-btn-primary">+ 新しい会話</button>
+      </div>
+      <div id="conv-list-container">
+        <div id="conv-list"></div>
+      </div>
       <div id="sidebar-actions">
         <button id="btn-clear" class="sidebar-btn">会話クリア</button>
         <button id="btn-autoconfirm" class="sidebar-btn">自動確認: OFF</button>
@@ -42,7 +48,7 @@
             <div id="pdf-progress-bar" class="pdf-progress-bar-fill"></div>
           </div>
         </div>
-        <div id="messages"></div>
+        <div id="messages-container"></div>
       </div>
 
       <div id="input-area">
