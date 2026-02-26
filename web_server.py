@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""web_server.py - ucf_desktop Web モード用 WebSocket ブリッジサーバー。
+"""web_server.py - ucf_desktop Web モード用 WebSocket ブリッジサーバー + REST API。
 
 Electron の main.js と同じ役割を Python + aiohttp で実現する:
   1. agent.py --gui をサブプロセスとして起動
   2. subprocess の stdout (JSON Lines) → WebSocket クライアントへブロードキャスト
   3. WebSocket クライアントからの JSON → subprocess の stdin へ書き込み
   4. desktop/renderer/ の静的ファイルを HTTP 配信
+
+REST API エンドポイント:
+  POST /api/query  - クエリ実行 (同期 JSON / SSE ストリーミング)
+  GET  /api/skills - スキル一覧
+  GET  /api/health - ヘルスチェック
 """
 
 import asyncio
@@ -188,6 +193,149 @@ async def index_handler(_request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html")
 
 
+# ── REST API ハンドラ ─────────────────────────────────────────
+
+
+async def api_query_handler(request: web.Request) -> web.StreamResponse:
+    """POST /api/query - クエリを実行して結果を返す。
+
+    Request body:
+        query (str): クエリ文字列 (必須)
+        skill (str):  使用するスキル名 (省略可)
+        stream (bool): SSE ストリーミングモード (デフォルト: false)
+        auto_confirm (bool|str): ツール実行許可レベル
+            true  = 全ツール自動許可 (デフォルト)
+            false = 破壊的操作を拒否
+            "read_only" = 破壊的操作を拒否
+        config (dict): config 上書き (model, timeout 等)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    query = body.get("query", "").strip()
+    if not query:
+        return web.json_response({"error": "query is required"}, status=400)
+
+    skill = body.get("skill")
+    stream = body.get("stream", False)
+    auto_confirm_raw = body.get("auto_confirm", True)
+    config_overrides = body.get("config") or {}
+
+    # auto_confirm の解釈
+    if auto_confirm_raw in (False, "read_only", "none"):
+        auto_confirm_bool = False
+    else:
+        auto_confirm_bool = True
+
+    # agent.py の run_query を遅延 import
+    from agent import run_query
+
+    if stream:
+        # ── SSE ストリーミングモード ──
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+        def sync_emit(obj: dict):
+            """chat() スレッドから呼ばれる: asyncio キューにイベントを投入。"""
+            loop.call_soon_threadsafe(queue.put_nowait, obj)
+
+        async def drain_queue():
+            """キューからイベントを取り出して SSE で送信する。"""
+            while True:
+                obj = await queue.get()
+                if obj is None:
+                    break
+                data = json.dumps(obj, ensure_ascii=False)
+                try:
+                    await response.write(f"data: {data}\n\n".encode("utf-8"))
+                except (ConnectionResetError, ConnectionAbortedError):
+                    break
+
+        drain_task = asyncio.create_task(drain_queue())
+
+        # ブロッキングな chat() をスレッドプールで実行
+        result = await asyncio.to_thread(
+            run_query,
+            query,
+            skill=skill,
+            auto_confirm=auto_confirm_bool,
+            config_overrides=config_overrides,
+            emit_callback=sync_emit,
+        )
+
+        # drain 完了シグナル
+        loop.call_soon_threadsafe(queue.put_nowait, None)
+        await drain_task
+
+        # 最終結果を送信
+        final = {
+            "type": "done",
+            "answer": result.get("answer", ""),
+        }
+        if result.get("error"):
+            final["error"] = result["error"]
+        try:
+            await response.write(
+                f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode("utf-8")
+            )
+            await response.write_eof()
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass
+        return response
+    else:
+        # ── 同期 JSON レスポンスモード ──
+        result = await asyncio.to_thread(
+            run_query,
+            query,
+            skill=skill,
+            auto_confirm=auto_confirm_bool,
+            config_overrides=config_overrides,
+            collect_events=True,
+        )
+        return web.json_response(result)
+
+
+async def api_skills_handler(_request: web.Request) -> web.Response:
+    """GET /api/skills - 利用可能なスキル一覧を返す。"""
+    from agent import _skill_registry
+
+    _skill_registry.scan()
+    skills = [
+        _skill_registry.skill_to_dict(s)
+        for s in _skill_registry.list_skills()
+    ]
+    return web.json_response({"skills": skills})
+
+
+async def api_health_handler(_request: web.Request) -> web.Response:
+    """GET /api/health - ヘルスチェック。"""
+    from agent import _load_config
+
+    config = _load_config()
+    return web.json_response({
+        "status": "ok",
+        "model": config.get("model", "gpt-4.1-mini"),
+        "cwd": os.getcwd(),
+        "has_api_key": bool(os.environ.get("OPENAI_API_KEY")),
+    })
+
+
+# ── アプリケーション構築 ────────────────────────────────────
+
+
 async def on_startup(app: web.Application) -> None:
     await bridge.start()
 
@@ -201,6 +349,12 @@ def create_app() -> web.Application:
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
+    # REST API ルート (静的ファイルのキャッチオールより先に登録)
+    app.router.add_post("/api/query", api_query_handler)
+    app.router.add_get("/api/skills", api_skills_handler)
+    app.router.add_get("/api/health", api_health_handler)
+
+    # WebSocket & 静的ファイル
     app.router.add_get("/ws", websocket_handler)
     app.router.add_get("/", index_handler)
     app.router.add_static("/", STATIC_DIR)

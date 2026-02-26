@@ -97,7 +97,7 @@ class Spinner:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        if _GUI_MODE:
+        if _is_output_mode():
             _emit({"type": "status", "message": self._message, "ephemeral": True})
             return
         if _NO_COLOR or not sys.stdout.isatty():
@@ -107,7 +107,7 @@ class Spinner:
         self._thread.start()
 
     def stop(self) -> None:
-        if _GUI_MODE:
+        if _is_output_mode():
             return
         self._stop_event.set()
         if self._thread is not None:
@@ -135,10 +135,13 @@ class Spinner:
 
 
 # ─────────────────────────────────────────────
-# GUI モード (Electron IPC)
+# GUI モード (Electron IPC) / API モード
 # ─────────────────────────────────────────────
 
 _GUI_MODE: bool = False
+
+# スレッドローカル: API モードで各リクエストの emit コールバック等を隔離
+_thread_local = threading.local()
 
 # 確認ダイアログの同期用
 _confirm_events: dict = {}   # id -> threading.Event
@@ -146,8 +149,19 @@ _confirm_results: dict = {}  # id -> bool
 _confirm_lock = threading.Lock()
 
 
+def _is_output_mode() -> bool:
+    """GUI モードまたは API モード (スレッドローカル callback) かどうかを返す。"""
+    if _GUI_MODE:
+        return True
+    return getattr(_thread_local, "emit_callback", None) is not None
+
+
 def _emit(obj: dict) -> None:
-    """GUI モード時に JSON Lines を stdout に書き出す。"""
+    """GUI/API モード時に JSON を出力する。API モードではスレッドローカル callback へ送る。"""
+    cb = getattr(_thread_local, "emit_callback", None)
+    if cb is not None:
+        cb(obj)
+        return
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
@@ -407,8 +421,13 @@ class SkillRegistry:
 
     def __init__(self) -> None:
         self._skills: dict[str, SkillInfo] = {}
+        self._lock = threading.Lock()
 
     def scan(self) -> None:
+        with self._lock:
+            self._scan_unlocked()
+
+    def _scan_unlocked(self) -> None:
         new_skills: dict[str, SkillInfo] = {}
         locations = [
             ("global", Path.home() / ".ucf_desktop" / "skills"),
@@ -731,7 +750,7 @@ def _resolve_path(path: str) -> str:
 def tool_run_command(
     command: str, cwd: Optional[str] = None, **kwargs
 ) -> str:
-    timeout = _ACTIVE_CONFIG.get("timeout", 120)
+    timeout = _get_active_config().get("timeout", 120)
     work_dir = _resolve_path(cwd) if cwd else None
     try:
         result = subprocess.run(
@@ -835,7 +854,7 @@ def _maybe_rescan_skills(resolved_path: str) -> None:
         try:
             if rp.is_relative_to(sd):
                 _skill_registry.scan()
-                if _GUI_MODE:
+                if _is_output_mode():
                     _emit({
                         "type": "skills_list",
                         "skills": [
@@ -1054,7 +1073,7 @@ def _list_dir_files(d: Optional[Path]) -> list[str]:
 def tool_run_skill(name: str, arguments: str = "") -> str:
     """スキルの指示をロードしてツール結果として返す。"""
     # 無効化されたスキルの実行をブロック
-    disabled = _ACTIVE_CONFIG.get("_disabled_skills", set())
+    disabled = _get_active_config().get("_disabled_skills", set())
     if name in disabled:
         return f"[error] スキル '{name}' は現在無効化されています。"
 
@@ -1100,7 +1119,7 @@ def tool_run_skill(name: str, arguments: str = "") -> str:
 
 def tool_think(thought: str) -> str:
     """ReAct の Thought ステップ。推論内容を表示し、進行状況をユーザーに伝える。"""
-    if _GUI_MODE:
+    if _is_output_mode():
         _emit({"type": "status", "message": f"💭 {thought}", "ephemeral": True})
     else:
         print(f"\n  {_cyan('💭')} {_dim(thought)}")
@@ -1137,6 +1156,14 @@ SAFE_COMMAND_PREFIXES = (
 _ACTIVE_CONFIG: dict = dict(DEFAULT_CONFIG)
 
 
+def _get_active_config() -> dict:
+    """アクティブな設定を返す。API モードではスレッドローカルの設定を優先する。"""
+    local_cfg = getattr(_thread_local, "api_config", None)
+    if local_cfg is not None:
+        return local_cfg
+    return _ACTIVE_CONFIG
+
+
 # ─────────────────────────────────────────────
 # 起動時 PDF 自動分析
 # ─────────────────────────────────────────────
@@ -1149,7 +1176,7 @@ def _run_pdf_analysis_background(client: OpenAI, config: dict):
 
     def _pdf_progress(data: dict):
         """PDF 分析の進捗を GUI に送信する。"""
-        if _GUI_MODE:
+        if _is_output_mode():
             _emit({"type": "pdf_progress", **data})
 
     try:
@@ -1160,10 +1187,10 @@ def _run_pdf_analysis_background(client: OpenAI, config: dict):
             client=client,
             vision_model=model,
             summary_model=model,
-            progress_callback=_pdf_progress if _GUI_MODE else None,
+            progress_callback=_pdf_progress if _is_output_mode() else None,
         )
     except Exception as e:
-        if _GUI_MODE:
+        if _is_output_mode():
             sys.stderr.write(f"PDF analysis error: {e}\n")
         else:
             print(f"  PDF analysis error: {e}")
@@ -1278,6 +1305,10 @@ def _resolve_confirmation(confirm_id: str, approved: bool) -> None:
 
 def _ask_confirmation(tool_name: str, args: dict) -> bool:
     """破壊的操作の実行前にユーザーに確認する。"""
+    # API モード: スレッドローカルの auto_confirm を使用
+    api_auto = getattr(_thread_local, "api_auto_confirm", None)
+    if api_auto is not None:
+        return api_auto
     if _GUI_MODE:
         return _ask_confirmation_gui(tool_name, args)
     print()
@@ -1488,7 +1519,10 @@ def _api_call_with_retry(client: OpenAI, **kwargs):
             if not retryable or attempt == MAX_RETRIES - 1:
                 raise
             wait = RETRY_BACKOFF * (2 ** attempt)
-            print(_dim(f"  ↻ リトライ ({attempt + 1}/{MAX_RETRIES}) {wait:.0f}秒後..."))
+            if _is_output_mode():
+                _emit({"type": "status", "message": f"リトライ ({attempt + 1}/{MAX_RETRIES}) {wait:.0f}秒後...", "ephemeral": True})
+            else:
+                print(_dim(f"  ↻ リトライ ({attempt + 1}/{MAX_RETRIES}) {wait:.0f}秒後..."))
             time.sleep(wait)
     raise last_err  # type: ignore
 
@@ -1592,10 +1626,10 @@ def chat(
             if delta.content:
                 if first_text:
                     spinner.stop()
-                    if not _GUI_MODE:
+                    if not _is_output_mode():
                         print()
                     first_text = False
-                if _GUI_MODE:
+                if _is_output_mode():
                     _emit({"type": "token", "content": delta.content})
                 else:
                     sys.stdout.write(delta.content)
@@ -1626,7 +1660,7 @@ def chat(
         full_content = "".join(collected_content)
 
         if not collected_tool_calls:
-            if _GUI_MODE:
+            if _is_output_mode():
                 _emit({"type": "assistant_done", "content": full_content})
             else:
                 if full_content:
@@ -1661,7 +1695,7 @@ def chat(
                 fn_args = json.loads(tc_data["function"]["arguments"])
             except json.JSONDecodeError:
                 fn_args = {}
-            if _GUI_MODE:
+            if _is_output_mode():
                 _emit({"type": "tool_call", "name": fn_name, "args": fn_args})
             else:
                 args_preview = json.dumps(fn_args, ensure_ascii=False)
@@ -1676,7 +1710,7 @@ def chat(
                 fn_name, fn_args, result = result_tuple
                 status = "error" if result.startswith("[error]") else \
                          "skipped" if result.startswith("[skipped]") else "ok"
-                if _GUI_MODE:
+                if _is_output_mode():
                     _emit({"type": "tool_result", "name": fn_name,
                            "result": result[:500], "status": status})
                 else:
@@ -1711,7 +1745,7 @@ def chat(
                         skip_confirm = True
                 if not skip_confirm and not _ask_confirmation(fn_name, fn_args):
                     result = "[skipped] ユーザーがキャンセルしました"
-                    if _GUI_MODE:
+                    if _is_output_mode():
                         _emit({"type": "tool_result", "name": fn_name,
                                "result": result, "status": "skipped"})
                     else:
@@ -1724,7 +1758,7 @@ def chat(
                     continue
             result = execute_tool(fn_name, fn_args)
             status = "error" if result.startswith("[error]") else "ok"
-            if _GUI_MODE:
+            if _is_output_mode():
                 _emit({"type": "tool_result", "name": fn_name,
                        "result": result[:500], "status": status})
             else:
@@ -1745,6 +1779,141 @@ def chat(
                 "tool_call_id": tc_data["id"],
                 "content": result,
             })
+
+
+# ─────────────────────────────────────────────
+# API モード: 独立セッションでクエリを実行
+# ─────────────────────────────────────────────
+
+
+def run_query(
+    query: str,
+    *,
+    skill: str | None = None,
+    auto_confirm: bool = True,
+    config_overrides: dict | None = None,
+    emit_callback=None,
+    collect_events: bool = False,
+) -> dict:
+    """
+    独立セッションでクエリを実行し結果を返す (REST API 用)。
+
+    Parameters:
+        query: ユーザーの自然言語クエリ
+        skill: スキル名 (省略可)。指定時はスキルの指示を注入
+        auto_confirm: True=破壊的操作も自動許可, False=破壊的操作を拒否
+        config_overrides: config 上書き (model, timeout 等)
+        emit_callback: ストリーミング用コールバック (各イベントを受信)
+        collect_events: True の場合、全イベントを返り値に含める
+
+    Returns:
+        {"answer": str, "events": list, "tool_calls": list, "error": str|None}
+    """
+    events: list[dict] = []
+    tool_calls_log: list[dict] = []
+
+    def _combined_callback(obj: dict):
+        if collect_events:
+            events.append(obj)
+        if obj.get("type") == "tool_call":
+            tool_calls_log.append(obj)
+        if emit_callback:
+            emit_callback(obj)
+
+    _thread_local.emit_callback = _combined_callback
+    _thread_local.api_auto_confirm = auto_confirm
+
+    try:
+        # OpenAI クライアント作成
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return {"answer": "", "error": "OPENAI_API_KEY not set",
+                    "events": [], "tool_calls": []}
+
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        client_kwargs: dict = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        client = OpenAI(**client_kwargs)
+
+        # config 構築
+        config = _load_config()
+        if config_overrides:
+            config.update(config_overrides)
+        config["_disabled_skills"] = set(config.get("disabled_skills", []))
+
+        _thread_local.api_config = config
+
+        # スキルスキャン
+        _skill_registry.scan()
+
+        # システムプロンプト構築
+        project_context = ""
+        if config.get("auto_context", True):
+            try:
+                project_context = _collect_project_context(
+                    max_files=config.get("auto_context_max_files", 50)
+                )
+            except Exception:
+                pass
+
+        system_prompt = _build_system_prompt(config, project_context)
+        messages: list = [{"role": "system", "content": system_prompt}]
+
+        # スキル指定時: スキルの指示をクエリに注入
+        if skill:
+            skill_obj = _skill_registry.get_skill(skill)
+            if skill_obj is None:
+                available = ", ".join(s.name for s in _skill_registry.list_skills())
+                return {"answer": "", "events": events, "tool_calls": tool_calls_log,
+                        "error": f"Skill '{skill}' not found. Available: {available or 'none'}"}
+            instructions = _skill_registry.load_instructions(skill)
+            if not instructions:
+                return {"answer": "", "events": events, "tool_calls": tool_calls_log,
+                        "error": f"Skill '{skill}' の読み込みに失敗しました"}
+
+            # スキルのバンドルリソース情報を追加
+            skill_dir = skill_obj.path.parent
+            scripts = _list_dir_files(skill_obj.scripts_dir)
+            references = _list_dir_files(skill_obj.references_dir)
+            assets = _list_dir_files(skill_obj.assets_dir)
+
+            skill_context = f"[スキル実行: {skill}]\n\n{instructions}"
+            if scripts or references or assets:
+                skill_context += "\n\n## バンドルリソース\n"
+                if scripts:
+                    skill_context += "\n### scripts/ (run_command で実行可能)\n"
+                    for s in scripts:
+                        skill_context += f"- `{skill_dir}/scripts/{s}`\n"
+                if references:
+                    skill_context += "\n### references/ (read_file で参照可能)\n"
+                    for r in references:
+                        skill_context += f"- `{skill_dir}/references/{r}`\n"
+                if assets:
+                    skill_context += "\n### assets/ (テンプレートや出力素材)\n"
+                    for a in assets:
+                        skill_context += f"- `{skill_dir}/assets/{a}`\n"
+
+            query = f"{skill_context}\n\n## ユーザーの質問\n{query}"
+
+        messages.append({"role": "user", "content": query})
+
+        # chat 実行
+        answer = chat(client, messages, config, auto_confirm=auto_confirm)
+
+        return {
+            "answer": answer,
+            "events": events,
+            "tool_calls": tool_calls_log,
+            "error": None,
+        }
+    except Exception as e:
+        return {"answer": "", "error": str(e),
+                "events": events, "tool_calls": tool_calls_log}
+    finally:
+        _thread_local.emit_callback = None
+        _thread_local.api_auto_confirm = None
+        _thread_local.api_config = None
 
 
 # ─────────────────────────────────────────────
