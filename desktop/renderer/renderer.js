@@ -42,7 +42,6 @@ const sendBtn      = document.getElementById('send-btn');
 const statusConn   = document.getElementById('status-conn');
 const statusModel  = document.getElementById('status-model');
 const statusCwd    = document.getElementById('status-cwd');
-const btnClear     = document.getElementById('btn-clear');
 const btnAutoconf  = document.getElementById('btn-autoconfirm');
 const skillsListEl = document.getElementById('skills-list');
 const btnSkillsReload = document.getElementById('btn-skills-reload');
@@ -639,16 +638,6 @@ btnNewConv.addEventListener('click', function() {
   var currentConv = getBackendConv();
   var currentHtml = currentConv ? currentConv.el.innerHTML : '';
   window.agent.sendCommand('new_conversation', { ui_html: currentHtml });
-});
-
-btnClear.addEventListener('click', function() {
-  var conv = getActiveConv();
-  if (!conv) return;
-  conv.el.innerHTML = '';
-  conv.pendingToolCards.length = 0;
-  conv.currentAssistantEl = null;
-  conv.currentAssistantRaw = '';
-  window.agent.sendCommand('clear');
 });
 
 btnAutoconf.addEventListener('click', function() {
