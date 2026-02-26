@@ -389,10 +389,11 @@ def _build_system_prompt(config: dict, project_context: str = "", disabled_skill
 ## 行動指針（重要）
 1. **まず調べてから行動する**: ファイルを編集する前に、必ず read_file や grep で現在の内容を確認してください。
 2. **段階的に作業する**: 大きなタスクは小さなステップに分解し、各ステップの結果を確認しながら進めてください。
-3. **エラーが出たら自分でリトライする**: ツール実行でエラーが出た場合は原因を分析し、別のアプローチを試みてください。ユーザーに聞く前に少なくとも2回は自力で解決を試みてください。
-4. **コンテキストを活用する**: プロジェクト構造、既存コードのパターン、使われているフレームワークを理解してから作業してください。
-5. **変更は最小限に**: edit_file で部分編集を優先し、write_file での全体書き換えは新規ファイル作成時のみ使ってください。
-6. **確認してから報告する**: ファイルを書き込んだ後は read_file で正しく書き込まれたか確認してください。コマンド実行後は exit code を確認してください。
+3. **長いファイルは段階的に読む**: read_file はデフォルトで最大2000行を返します。残りがある場合は結果に次の offset が表示されるので、必要に応じて offset を指定して続きを読み込んでください。全体を一度に読む必要はありません。必要な部分だけを読みましょう。
+4. **エラーが出たら自分でリトライする**: ツール実行でエラーが出た場合は原因を分析し、別のアプローチを試みてください。ユーザーに聞く前に少なくとも2回は自力で解決を試みてください。
+5. **コンテキストを活用する**: プロジェクト構造、既存コードのパターン、使われているフレームワークを理解してから作業してください。
+6. **変更は最小限に**: edit_file で部分編集を優先し、write_file での全体書き換えは新規ファイル作成時のみ使ってください。
+7. **確認してから報告する**: ファイルを書き込んだ後は read_file で正しく書き込まれたか確認してください。コマンド実行後は exit code を確認してください。
 
 ## ルール
 - ファイルパスに ~ が含まれる場合は展開して使ってください。
@@ -600,7 +601,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "指定したファイルの内容を読み込んで返す。"
+            "description": "指定したファイルの内容を行番号付きで読み込んで返す。"
+            "デフォルトで先頭から最大2000行を返す。"
+            "2000行を超えるファイルの場合、残りの行数と次のoffset値が通知されるので、"
+            "offset を指定して続きを段階的に読み込むこと。"
             "テキストファイルのみ対応。バイナリファイルの場合はエラーを返す。",
             "parameters": {
                 "type": "object",
@@ -615,11 +619,13 @@ TOOLS = [
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "読み込み開始行番号（0始まり、省略時は0）",
+                        "description": "読み込み開始行番号（0始まり、省略時は0）。"
+                        "長いファイルを段階的に読む場合、前回の結果で通知されたoffset値を指定する。",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "読み込む最大行数（省略時は全行）",
+                        "description": "読み込む最大行数（省略時は2000行）。"
+                        "特定の範囲だけ読みたい場合に指定する。",
                     },
                 },
                 "required": ["path"],
@@ -857,21 +863,31 @@ def tool_read_file(
     offset: int = 0,
     limit: Optional[int] = None,
 ) -> str:
+    DEFAULT_LINE_LIMIT = 2000
+    MAX_LINE_CHARS = 2000
     resolved = _resolve_path(path)
     try:
         with open(resolved, "r", encoding=encoding) as f:
             lines = f.readlines()
         total = len(lines)
-        selected = lines[offset:] if limit is None else lines[offset : offset + limit]
-        content = "".join(selected)
-        if len(content) > 100_000:
-            content = content[:100_000] + f"\n\n[...truncated, total {len(content)} chars]"
-        header = f"[{resolved}] ({total} lines total"
-        if offset > 0 or limit is not None:
-            end = offset + len(selected)
-            header += f", showing lines {offset + 1}-{end}"
-        header += ")\n"
-        return header + content
+        # デフォルトで最大 DEFAULT_LINE_LIMIT 行まで読み込む
+        effective_limit = limit if limit is not None else DEFAULT_LINE_LIMIT
+        selected = lines[offset : offset + effective_limit]
+        # 行番号付き（cat -n 形式）＋長い行は切り詰め
+        numbered_lines = []
+        for i, line in enumerate(selected):
+            line_num = offset + i + 1  # 1-based
+            line_content = line.rstrip("\n")
+            if len(line_content) > MAX_LINE_CHARS:
+                line_content = line_content[:MAX_LINE_CHARS] + "... [truncated]"
+            numbered_lines.append(f"  {line_num:>6}\t{line_content}")
+        content = "\n".join(numbered_lines)
+        end = offset + len(selected)
+        header = f"[{resolved}] ({total} lines total, showing lines {offset + 1}-{end})"
+        if end < total:
+            remaining = total - end
+            header += f"\n[NOTE: {remaining} more lines remaining. Use offset={end} to read the next chunk.]"
+        return header + "\n" + content
     except UnicodeDecodeError:
         return f"[error] バイナリファイルまたはエンコーディング '{encoding}' で読み込めません: {resolved}"
     except FileNotFoundError:
@@ -901,12 +917,21 @@ def tool_read_file(
                         with open(found, "r", encoding=encoding) as f2:
                             lines2 = f2.readlines()
                         total2 = len(lines2)
-                        selected2 = lines2[offset:] if limit is None else lines2[offset : offset + limit]
-                        content2 = "".join(selected2)
-                        if len(content2) > 100_000:
-                            content2 = content2[:100_000] + f"\n\n[...truncated]"
-                        header2 = f"[auto-resolved: {found}] ({total2} lines total)\n"
-                        return header2 + content2
+                        effective_limit2 = limit if limit is not None else DEFAULT_LINE_LIMIT
+                        selected2 = lines2[offset : offset + effective_limit2]
+                        numbered2 = []
+                        for i, line in enumerate(selected2):
+                            ln = offset + i + 1
+                            lc = line.rstrip("\n")
+                            if len(lc) > MAX_LINE_CHARS:
+                                lc = lc[:MAX_LINE_CHARS] + "... [truncated]"
+                            numbered2.append(f"  {ln:>6}\t{lc}")
+                        content2 = "\n".join(numbered2)
+                        end2 = offset + len(selected2)
+                        header2 = f"[auto-resolved: {found}] ({total2} lines total, showing lines {offset + 1}-{end2})"
+                        if end2 < total2:
+                            header2 += f"\n[NOTE: {total2 - end2} more lines remaining. Use offset={end2} to read the next chunk.]"
+                        return header2 + "\n" + content2
                     except Exception:
                         pass
                 return hint
