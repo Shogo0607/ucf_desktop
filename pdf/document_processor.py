@@ -58,6 +58,31 @@ def _markdown_to_summary(client: OpenAI, model: str, markdown: str) -> dict:
     return json.loads(content)
 
 
+def _markdown_to_metadata(client: OpenAI, model: str, markdown: str) -> dict:
+    """Markdown テキストから要約 + 構造化メタデータを1回のLLMコールで生成する。"""
+    snippet = markdown.strip()
+    if len(snippet) > 6000:
+        snippet = snippet[:6000] + "\n...[truncated]"
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": loader.get_prompt("METADATA_EXTRACTION_PROMPT")},
+            {"role": "user", "content": f"以下はページの内容です。\n\n```markdown\n{snippet}\n```"},
+        ],
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content or "{}"
+    parsed = json.loads(content)
+    return {
+        "summary": parsed.get("summary", ""),
+        "topics": parsed.get("topics", []),
+        "keywords": parsed.get("keywords", []),
+        "section_header": parsed.get("section_header", ""),
+        "page_type": parsed.get("page_type", "other"),
+    }
+
+
 def process_pages_batch(
     images: List[Image.Image],
     client: OpenAI,
@@ -104,19 +129,19 @@ def process_pages_batch(
             if progress_callback:
                 progress_callback("converting", completed_count, total)
 
-    # 2. Markdown -> Summary (concurrent)
-    def _summarize_page(md):
-        return _markdown_to_summary(client, summary_model, md)
+    # 2. Markdown -> Metadata (summary + topics + keywords etc.) (concurrent)
+    def _extract_metadata(md):
+        return _markdown_to_metadata(client, summary_model, md)
 
     completed_count = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrency) as executor:
-        futures = {executor.submit(_summarize_page, md): i for i, md in enumerate(markdown_results)}
+        futures = {executor.submit(_extract_metadata, md): i for i, md in enumerate(markdown_results)}
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             try:
                 summary_results[index] = future.result()
             except Exception as e:
-                sys.stderr.write(f"Error summarizing page {index+1}: {e}\n")
+                sys.stderr.write(f"Error extracting metadata for page {index+1}: {e}\n")
                 summary_results[index] = {}
             completed_count += 1
             if progress_callback:
@@ -125,9 +150,16 @@ def process_pages_batch(
     results = {}
     for i in range(total):
         page_num = i + 1
+        meta = summary_results[i] or {}
         results[page_num] = {
             "markdown": markdown_results[i],
-            "summary": summary_results[i].get("summary", ""),
+            "summary": meta.get("summary", ""),
+            "metadata": {
+                "topics": meta.get("topics", []),
+                "keywords": meta.get("keywords", []),
+                "section_header": meta.get("section_header", ""),
+                "page_type": meta.get("page_type", "other"),
+            },
         }
 
     return results

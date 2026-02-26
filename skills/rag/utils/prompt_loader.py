@@ -23,6 +23,20 @@ _DEFAULT_PROMPTS = {
         '{"summary": "このページの内容の要約（2-3文）"}\n'
         "JSONのみを出力し、余計なテキストは含めないでください。"
     ),
+    "METADATA_EXTRACTION_PROMPT": (
+        "あなたはドキュメントのメタデータを抽出する専門家です。\n"
+        "与えられたMarkdownテキストを読み、以下のJSON形式で情報を抽出してください:\n"
+        "{\n"
+        '  "summary": "このページの内容の要約（2-3文）",\n'
+        '  "topics": ["トピック1", "トピック2", ...],\n'
+        '  "keywords": ["キーワード1", "キーワード2", ...],\n'
+        '  "section_header": "このページが属するセクション名",\n'
+        '  "page_type": "cover|toc|instruction|specification|troubleshooting|maintenance|safety|other"\n'
+        "}\n\n"
+        "topicsは3-5個の主要トピック、keywordsは5-10個の検索用キーワード"
+        "（製品名、技術用語、機能名、数値を含む）を抽出してください。\n"
+        "JSONのみを出力し、余計なテキストは含めないでください。"
+    ),
 }
 
 

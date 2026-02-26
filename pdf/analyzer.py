@@ -2,9 +2,10 @@ import sys
 from pathlib import Path
 from openai import OpenAI
 
-from pdf.file_manager import find_unanalyzed_pdfs, save_json, move_processed_pdf, create_output_directory
+from pdf.file_manager import find_unanalyzed_pdfs, save_json, save_embeddings, move_processed_pdf, create_output_directory
 from pdf.converter import convert_pdf_to_images
 from pdf.document_processor import process_pages_batch
+from pdf.embeddings import generate_embeddings
 
 from typing import Dict, Any, Optional, Callable
 
@@ -103,16 +104,19 @@ def _process_single_pdf(
         progress_callback=_page_progress,
     )
 
-    # 3. Build JSON array: [{page, summary, content}, ...]
+    # 3. Build JSON array: [{page, summary, content, metadata}, ...]
     _notify("saving", "保存中...", 95)
     pages_json = []
     for page_num in sorted(page_data.keys()):
         data = page_data[page_num]
-        pages_json.append({
+        entry = {
             "page": page_num,
             "summary": data["summary"],
-            "content": data["markdown"]
-        })
+            "content": data["markdown"],
+        }
+        if "metadata" in data:
+            entry["metadata"] = data["metadata"]
+        pages_json.append(entry)
 
     # 4. Create output directory (same name as PDF stem) and save files inside
     output_dir = create_output_directory(pdf_path)
@@ -122,7 +126,17 @@ def _process_single_pdf(
     save_json(pages_json, json_output_path)
     _log(f"  Saved {len(pages_json)} pages to {json_output_path}")
 
-    # 5. Move original PDF into output directory and rename
+    # 5. Generate and save embeddings
+    _notify("embedding", "埋め込み生成中...", 96)
+    try:
+        embeddings_data = generate_embeddings(client, pages_json)
+        embeddings_path = output_dir / f"{pdf_path.stem}_embeddings.json"
+        save_embeddings(embeddings_data, embeddings_path)
+        _log(f"  Saved embeddings to {embeddings_path}")
+    except Exception as e:
+        _log(f"  Failed to generate embeddings: {e}")
+
+    # 6. Move original PDF into output directory and rename
     try:
         new_path = move_processed_pdf(pdf_path, output_dir)
         _log(f"  Finished {pdf_name} -> {new_path}")

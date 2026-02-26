@@ -13,7 +13,8 @@ database/ 内の **全ファイル**（JSON, Markdown, CSV, テキスト）を�
 
 | 形式 | 説明 |
 |---|---|
-| `.json` | PDF から生成されたページデータ `[{page, summary, content}, ...]` |
+| `.json` | PDF から生成されたページデータ `[{page, summary, content, metadata}, ...]` |
+| `_embeddings.json` | セマンティック検索用の埋め込みベクトル |
 | `.md` | Markdown ドキュメント（旧形式 or 手動作成） |
 | `.csv` | CSV データ（想定質問リスト等） |
 | `.txt` | テキストファイル |
@@ -35,8 +36,8 @@ database/ 内の **全ファイル**（JSON, Markdown, CSV, テキスト）を�
 - database/ に加えて追加フォルダそれぞれに対してもコマンドを実行する
 - 例: 追加フォルダが `/Users/user/docs` の場合:
   ```
-  uv run python {scripts}/search_json.py keywords --dir database
-  uv run python {scripts}/search_json.py keywords --dir /Users/user/docs
+  uv run python {scripts}/search_json.py hybrid "質問文" --dir database
+  uv run python {scripts}/search_json.py hybrid "質問文" --dir /Users/user/docs
   ```
 - 出典カードにはフォルダパスを含めて表示する
 
@@ -49,7 +50,7 @@ database/ 内の **全ファイル**（JSON, Markdown, CSV, テキスト）を�
 `think` ツールで現在の状況と次のアクションを宣言する:
 
 ```
-think: "質問「冷蔵庫の温度設定方法」→ まず JSON ファイル一覧を取得して関連ドキュメントを探す"
+think: "質問「冷蔵庫の温度設定方法」→ まずハイブリッド検索で関連ページを探す"
 ```
 
 ### 2. Act（行動）
@@ -58,8 +59,10 @@ think: "質問「冷蔵庫の温度設定方法」→ まず JSON ファイル�
 
 | 目的 | 使うツール |
 |---|---|
+| **ハイブリッド検索（第一選択）** | `run_command: uv run python {scripts}/search_json.py hybrid "質問文" --dir database` |
+| **セマンティック検索（抽象的な質問向け）** | `run_command: uv run python {scripts}/search_json.py semantic "質問文" --dir database` |
 | 全ファイル一覧の取得（JSON/md/csv/txt） | `run_command: uv run python {scripts}/search_json.py list --dir database` |
-| **キーワード一覧取得（検索前に必須）** | `run_command: uv run python {scripts}/search_json.py keywords --dir database` |
+| キーワード一覧取得 | `run_command: uv run python {scripts}/search_json.py keywords --dir database` |
 | キーワードで横断検索（全形式対応） | `run_command: uv run python {scripts}/search_json.py search "キーワード" --dir database` |
 | JSON の全サマリー一覧 | `run_command: uv run python {scripts}/search_json.py summaries "ファイル名.json" --dir database` |
 | JSON の特定ページ全文取得 | `run_command: uv run python {scripts}/search_json.py get_page "ファイル名.json" ページ番号 --dir database` |
@@ -73,22 +76,41 @@ think: "質問「冷蔵庫の温度設定方法」→ まず JSON ファイル�
 
 - **JSON で関連ページが見つかった** → `get_page` で全文を取得してからループ継続
 - **md/csv/txt で関連ファイルが見つかった** → `read_file` で全文を取得してからループ継続
-- **情報が見つからなかった** → 別のキーワードや類義語で再検索
+- **情報が見つからなかった** → 別の検索戦略に切り替え
 - **十分な情報が揃った** → ループ終了、回答生成へ
 
 ## 検索戦略（重要）
 
-### キーワードインデックス方式（推奨）
+### 1. ハイブリッド検索（推奨・第一選択）
 
-**検索前に必ず `keywords` でキーワード一覧を取得する。**
-これにより、ユーザーのクエリとデータベース内の実際の表現が異なる場合でも、
-最適なキーワードを選定して正確に検索できる。
+**まずハイブリッド検索を使う。** セマンティック検索とキーワード検索を自動で組み合わせ、
+スコア順にランキングされた結果を返す。ユーザーの質問をそのまま検索クエリとして使える。
+
+```
+uv run python {scripts}/search_json.py hybrid "冷蔵庫の容量は？" --dir database
+```
+
+- セマンティック類似度（60%）+ キーワード一致（40%）でスコアリング
+- キーワードが一致しなくても意味的に関連するページがヒットする
+- スコアが高い順に結果が返る
+
+### 2. セマンティック検索（自然言語クエリ向け）
+
+ユーザーの質問が抽象的・自然言語的で、正確なキーワードが分からない場合に有効。
+
+```
+uv run python {scripts}/search_json.py semantic "食べ物を長持ちさせる方法" --dir database
+```
+
+### 3. キーワードインデックス方式（フォールバック）
+
+embeddingファイルがない場合や、exact matchが必要な場合に使用。
 
 1. **キーワードインデックス取得**: `keywords` で全ファイルのキーワード一覧を取得
 2. **最適キーワード選定**: ユーザーのクエリとキーワード一覧を照合し、最も関連性の高いキーワードを選ぶ
    - 例: クエリ「容量」→ キーワード一覧から「定格内容積」「容量」「冷蔵室」等を発見 → 「定格内容積」で検索
    - 例: クエリ「電気代」→ キーワード一覧から「消費電力」「年間電力」等を発見 → 「消費電力」で検索
-3. **キーワード横断検索**: 選定したキーワードで `search` を実行
+3. **キーワード横断検索**: 選定したキーワードで `search` を実行（スコア付きで結果が返る）
 4. **サマリー閲覧**: JSON がヒットしたら `summaries` で全ページ概要を把握
 5. **全文取得**: JSON は `get_page`、md/csv/txt は `read_file` で全文を取得
 6. **類義語・関連語で再検索**: ヒットしなければ、キーワード一覧から別の候補を選んで `search`
@@ -127,34 +149,41 @@ think: "質問「冷蔵庫の温度設定方法」→ まず JSON ファイル�
 
 ## 実行例
 
-### 例1: キーワードインデックスを使った検索
+### 例1: ハイブリッド検索（推奨）
 ```
-think: "質問は「冷蔵庫の容量」。まずキーワード一覧を取得して最適な検索語を選ぶ"
-run_command: uv run python {scripts}/search_json.py keywords --dir database
-think: "キーワード一覧に「定格内容積」「冷蔵室」「冷凍室」がある。「容量」よりも「定格内容積」で検索した方が正確"
-run_command: uv run python {scripts}/search_json.py search "定格内容積" --dir database
-think: "r_h54xg_b.json の Page 3 にヒット。全文を取得する"
-run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 3 --dir database
+think: "質問は「冷蔵庫の容量」。ハイブリッド検索を試す"
+run_command: uv run python {scripts}/search_json.py hybrid "冷蔵庫の容量" --dir database
+think: "r_h54xg_b.json の Page 34 がスコア 0.85 でヒット。全文を取得する"
+run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 34 --dir database
 think: "容量の具体的な数値を取得した。回答を生成する"
 → 回答を生成
 ```
 
-### 例2: JSON（PDF由来）から検索
+### 例2: ハイブリッド検索 → キーワード補完
 ```
-think: "質問は「冷蔵庫の温度設定方法」。まずキーワード一覧を取得する"
-run_command: uv run python {scripts}/search_json.py keywords --dir database
-think: "キーワード一覧に「温度設定」「温度」「設定」がある。「温度設定」で横断検索する"
-run_command: uv run python {scripts}/search_json.py search "温度設定" --dir database
-think: "r_h54xg_b.json の Page 10, 11 にヒット。全文を取得する"
+think: "質問は「冷蔵庫の温度設定方法」。ハイブリッド検索を試す"
+run_command: uv run python {scripts}/search_json.py hybrid "冷蔵庫の温度設定方法" --dir database
+think: "r_h54xg_b.json の Page 10, 20 にヒット。全文を取得する"
 run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 10 --dir database
-run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 11 --dir database
+run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 20 --dir database
 think: "温度設定の具体的な手順を取得した。回答を生成する"
 → 回答を生成
 ```
 
-### 例3: Markdown ファイルから検索
+### 例3: セマンティック検索（抽象的な質問）
 ```
-think: "質問は「冷蔵庫のお手入れ方法」。キーワード一覧を取得する"
+think: "質問は「食べ物を長持ちさせるコツ」。抽象的なのでセマンティック検索を使う"
+run_command: uv run python {scripts}/search_json.py semantic "食べ物を長持ちさせるコツ" --dir database
+think: "保存食品例のPage 9, 野菜室のPage 18 がヒット。全文を取得する"
+run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 9 --dir database
+run_command: uv run python {scripts}/search_json.py get_page "r_h54xg_b.json" 18 --dir database
+think: "保存のコツを取得した。回答を生成する"
+→ 回答を生成
+```
+
+### 例4: キーワードインデックス方式（フォールバック）
+```
+think: "ハイブリッド検索で十分な結果が得られなかった。キーワードインデックスを使う"
 run_command: uv run python {scripts}/search_json.py keywords --dir database
 think: "キーワード一覧に「お手入れ」「清掃」がある。「お手入れ」で横断検索する"
 run_command: uv run python {scripts}/search_json.py search "お手入れ" --dir database

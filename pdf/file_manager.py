@@ -56,6 +56,13 @@ def save_json(pages_data: List[Dict[str, Any]], output_path: Path) -> None:
         json.dump(pages_data, f, ensure_ascii=False, indent=2)
 
 
+def save_embeddings(embeddings_data: dict, output_path: Path) -> None:
+    """埋め込みデータをJSON形式で保存する（インデントなしでファイルサイズ削減）。"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(embeddings_data, f, ensure_ascii=False)
+
+
 def move_processed_pdf(pdf_path: Path, output_dir: Path) -> Path:
     """
     Moves the processed PDF file into the output directory and appends '_analyzed' to the filename.
