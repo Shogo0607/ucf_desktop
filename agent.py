@@ -174,10 +174,13 @@ _PROJECT_DIR = Path(__file__).resolve().parent
 _CONFIG_DIR = _PROJECT_DIR / ".ucf_desktop"
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
+# TodoWrite で管理するタスクリスト
+_todo_list: list[dict] = []
+
 DEFAULT_CONFIG = {
     "model": "gpt-4.1-mini",
     "timeout": 120,
-    "auto_confirm": False,
+    "permission_mode": "ask",  # "ask" | "auto_read" | "auto_all"
     "max_context_messages": 200,
     "compact_keep_recent": 10,
     "auto_context": True,
@@ -195,6 +198,11 @@ def _load_config() -> dict:
             config.update(project_cfg)
         except Exception:
             pass
+    # 後方互換: auto_confirm -> permission_mode
+    if "auto_confirm" in config:
+        if "permission_mode" not in config or config.get("permission_mode") == DEFAULT_CONFIG["permission_mode"]:
+            config["permission_mode"] = "auto_all" if config["auto_confirm"] else "ask"
+        del config["auto_confirm"]
     return config
 
 
@@ -815,6 +823,44 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": "構造化されたタスクリストを作成・更新する。"
+            "複数ステップのタスクの進捗管理に使用する。"
+            "呼び出すたびにリスト全体を置き換える。"
+            "status は pending（未着手）、in_progress（作業中）、completed（完了）のいずれか。"
+            "in_progress は同時に1つだけにすること。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "タスク内容（命令形: 例「テストを実行する」）",
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                },
+                                "activeForm": {
+                                    "type": "string",
+                                    "description": "実行中の表示形（進行形: 例「テストを実行中」）",
+                                },
+                            },
+                            "required": ["content", "status", "activeForm"],
+                        },
+                    },
+                },
+                "required": ["todos"],
+            },
+        },
+    },
 ]
 
 # ─────────────────────────────────────────────
@@ -1225,6 +1271,25 @@ def tool_think(thought: str) -> str:
     return f"[thought] {thought}"
 
 
+def tool_todo_write(todos: list) -> str:
+    """構造化されたタスクリストを作成・更新する。"""
+    global _todo_list
+    _todo_list = todos
+    if _is_output_mode():
+        _emit({"type": "todo_update", "todos": todos})
+    else:
+        # CLI 表示
+        for t in todos:
+            icon = {"pending": "○", "in_progress": "◉", "completed": "●"}.get(t.get("status"), "?")
+            status_color = {
+                "pending": _dim, "in_progress": _cyan, "completed": _green
+            }.get(t.get("status"), _dim)
+            print(f"  {status_color(icon)} {t.get('content', '')} {_dim('[' + t.get('status', '') + ']')}")
+    in_progress = [t for t in todos if t.get("status") == "in_progress"]
+    label = in_progress[0].get("activeForm", "") if in_progress else ""
+    return f"[todo] {len(todos)} タスクを更新。実行中: {label or 'なし'}"
+
+
 # ─────────────────────────────────────────────
 # ツールディスパッチ
 # ─────────────────────────────────────────────
@@ -1240,6 +1305,7 @@ TOOL_FUNCTIONS = {
     "get_file_info": tool_get_file_info,
     "run_skill": tool_run_skill,
     "think": tool_think,
+    "todo_write": tool_todo_write,
 }
 
 DESTRUCTIVE_TOOLS = {"run_command", "write_file", "edit_file"}
@@ -1250,6 +1316,36 @@ SAFE_COMMAND_PREFIXES = (
     "uv run python skills/",
     "uv run python pdf/",
 )
+
+# auto_read モードで確認不要とみなす読み取り系コマンドパターン
+_READ_COMMAND_PREFIXES = (
+    "ls ", "ls\n", "cat ", "head ", "tail ", "git status", "git log",
+    "git diff", "git branch", "git show", "pwd", "echo ", "which ",
+    "type ", "file ", "wc ", "du ", "df ", "find ", "tree ",
+    "grep ", "rg ", "ag ",
+)
+
+
+def _needs_confirmation(fn_name: str, fn_args: dict, permission_mode: str) -> bool:
+    """パーミッションモードに基づいて確認が必要か判定する。"""
+    if permission_mode == "auto_all":
+        return False
+    if fn_name not in DESTRUCTIVE_TOOLS:
+        return False
+    # SAFE_COMMAND_PREFIXES は全モードで確認スキップ
+    if fn_name == "run_command":
+        cmd = fn_args.get("command", "")
+        if any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
+            return False
+    if permission_mode == "auto_read":
+        if fn_name == "run_command":
+            cmd = fn_args.get("command", "").strip()
+            if any(cmd.startswith(p) for p in _READ_COMMAND_PREFIXES):
+                return False
+        return True
+    # "ask" モード: 全破壊ツールで確認
+    return True
+
 
 # 設定のグローバル参照（main で上書き）
 _ACTIVE_CONFIG: dict = dict(DEFAULT_CONFIG)
@@ -1628,7 +1724,7 @@ def _api_call_with_retry(client: OpenAI, **kwargs):
 
 def _execute_tools_parallel(
     tool_calls_data: list,
-    auto_confirm: bool,
+    permission_mode: str = "ask",
 ) -> list:
     """複数ツールを並列実行する。破壊的操作は直列で確認する。"""
     results = [None] * len(tool_calls_data)
@@ -1638,16 +1734,11 @@ def _execute_tools_parallel(
     destructive_indices = []
     for i, tc_data in enumerate(tool_calls_data):
         fn_name = tc_data["function"]["name"]
-        if fn_name in DESTRUCTIVE_TOOLS and not auto_confirm:
-            # ホワイトリストに該当する run_command は安全扱い
-            if fn_name == "run_command":
-                try:
-                    cmd = json.loads(tc_data["function"]["arguments"]).get("command", "")
-                except (json.JSONDecodeError, AttributeError):
-                    cmd = ""
-                if any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
-                    safe_indices.append(i)
-                    continue
+        try:
+            fn_args = json.loads(tc_data["function"]["arguments"])
+        except (json.JSONDecodeError, AttributeError):
+            fn_args = {}
+        if _needs_confirmation(fn_name, fn_args, permission_mode):
             destructive_indices.append(i)
         else:
             safe_indices.append(i)
@@ -1690,7 +1781,7 @@ def chat(
     client: OpenAI,
     messages: list,
     config: dict,
-    auto_confirm: bool = False,
+    permission_mode: str = "ask",
 ) -> str:
     """
     OpenAI API にストリーミングでメッセージを送り、ツール呼び出しがあれば実行して
@@ -1804,7 +1895,7 @@ def chat(
 
         # 並列 / 直列でツール実行
         if len(tool_calls_list) > 1:
-            results = _execute_tools_parallel(tool_calls_list, auto_confirm)
+            results = _execute_tools_parallel(tool_calls_list, permission_mode)
             for i, (tc_data, result_tuple) in enumerate(zip(tool_calls_list, results)):
                 fn_name, fn_args, result = result_tuple
                 status = "error" if result.startswith("[error]") else \
@@ -1835,14 +1926,8 @@ def chat(
             except json.JSONDecodeError:
                 fn_args = {}
 
-            if fn_name in DESTRUCTIVE_TOOLS and not auto_confirm:
-                # ホワイトリストに該当する run_command は確認スキップ
-                skip_confirm = False
-                if fn_name == "run_command":
-                    cmd = fn_args.get("command", "")
-                    if any(cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
-                        skip_confirm = True
-                if not skip_confirm and not _ask_confirmation(fn_name, fn_args):
+            if _needs_confirmation(fn_name, fn_args, permission_mode):
+                if not _ask_confirmation(fn_name, fn_args):
                     result = "[skipped] ユーザーがキャンセルしました"
                     if _is_output_mode():
                         _emit({"type": "tool_result", "name": fn_name,
@@ -1890,6 +1975,7 @@ def run_query(
     *,
     skill: str | None = None,
     auto_confirm: bool = True,
+    permission_mode: str | None = None,
     config_overrides: dict | None = None,
     emit_callback=None,
     collect_events: bool = False,
@@ -1900,7 +1986,9 @@ def run_query(
     Parameters:
         query: ユーザーの自然言語クエリ
         skill: スキル名 (省略可)。指定時はスキルの指示を注入
-        auto_confirm: True=破壊的操作も自動許可, False=破壊的操作を拒否
+        auto_confirm: 後方互換 (True=auto_all, False=ask)
+        permission_mode: パーミッションモード ("ask"|"auto_read"|"auto_all")。
+                         指定時は auto_confirm より優先。
         config_overrides: config 上書き (model, timeout 等)
         emit_callback: ストリーミング用コールバック (各イベントを受信)
         collect_events: True の場合、全イベントを返り値に含める
@@ -1908,6 +1996,12 @@ def run_query(
     Returns:
         {"answer": str, "events": list, "tool_calls": list, "error": str|None}
     """
+    # permission_mode を解決
+    if permission_mode is None:
+        resolved_permission = "auto_all" if auto_confirm else "ask"
+    else:
+        resolved_permission = permission_mode
+
     events: list[dict] = []
     tool_calls_log: list[dict] = []
 
@@ -1998,7 +2092,7 @@ def run_query(
         messages.append({"role": "user", "content": query})
 
         # chat 実行
-        answer = chat(client, messages, config, auto_confirm=auto_confirm)
+        answer = chat(client, messages, config, permission_mode=resolved_permission)
 
         return {
             "answer": answer,
@@ -2099,13 +2193,28 @@ def cmd_tokens(messages: list, config: dict, **_) -> None:
     print(f"  使用率: {color(f'{bar} {usage_pct}%')}")
 
 
-@slash_command("autoconfirm", "自動確認モードを切り替え")
-def cmd_autoconfirm(state: dict, config: dict, **_) -> None:
-    state["auto_confirm"] = not state.get("auto_confirm", False)
-    config["auto_confirm"] = state["auto_confirm"]
-    mode = "ON" if state["auto_confirm"] else "OFF"
-    color = _red if state["auto_confirm"] else _green
-    print(color(f"  自動確認モード: {mode}"))
+_PERMISSION_MODES = ["ask", "auto_read", "auto_all"]
+_PERMISSION_LABELS = {"ask": "常に確認", "auto_read": "読み取り自動許可", "auto_all": "全自動"}
+_PERMISSION_COLORS = {"ask": _green, "auto_read": _yellow, "auto_all": _red}
+
+
+@slash_command("permission", "パーミッションモードを切り替え (ask / auto_read / auto_all)")
+def cmd_permission(state: dict, config: dict, args: str = "", **_) -> None:
+    if args.strip() in _PERMISSION_MODES:
+        new_mode = args.strip()
+    else:
+        current = state.get("permission_mode", "ask")
+        idx = _PERMISSION_MODES.index(current) if current in _PERMISSION_MODES else 0
+        new_mode = _PERMISSION_MODES[(idx + 1) % len(_PERMISSION_MODES)]
+    state["permission_mode"] = new_mode
+    config["permission_mode"] = new_mode
+    color_fn = _PERMISSION_COLORS.get(new_mode, _dim)
+    print(color_fn(f"  パーミッションモード: {_PERMISSION_LABELS[new_mode]} ({new_mode})"))
+
+
+@slash_command("autoconfirm", "パーミッションモードを切り替え (/permission のエイリアス)")
+def cmd_autoconfirm(state: dict, config: dict, args: str = "", **_) -> None:
+    cmd_permission(state=state, config=config, args=args)
 
 
 @slash_command("model", "使用モデルを変更 (例: /model gpt-4.1)")
@@ -2194,7 +2303,7 @@ def cmd_image(messages: list, client: OpenAI, config: dict, state: dict, args: s
 
     messages.append(img_msg)
     try:
-        chat(client, messages, config, auto_confirm=state.get("auto_confirm", False))
+        chat(client, messages, config, permission_mode=state.get("permission_mode", "ask"))
     except KeyboardInterrupt:
         print(_yellow("\n  中断しました。"))
     except Exception as e:
@@ -2253,7 +2362,78 @@ def cmd_skill(messages: list, client: OpenAI, config: dict, state: dict, args: s
     print(f"  {_cyan('🔧')} スキル '{skill_name}' を実行中...")
 
     try:
-        chat(client, messages, config, auto_confirm=state.get("auto_confirm", False))
+        chat(client, messages, config, permission_mode=state.get("permission_mode", "ask"))
+    except KeyboardInterrupt:
+        print(_yellow("\n  中断しました。"))
+    except Exception as e:
+        print(f"\n{_red('[API error]')} {e}")
+        messages.pop()
+
+
+@slash_command("init", "プロジェクト指示ファイル (UCF.md) を生成")
+def cmd_init(messages: list, client: OpenAI, config: dict, state: dict, **_) -> None:
+    ucf_path = os.path.join(os.getcwd(), "UCF.md")
+    if os.path.isfile(ucf_path):
+        print(_yellow(f"  UCF.md は既に存在します: {ucf_path}"))
+        print(_dim("  上書きしたい場合は削除してから再実行してください。"))
+        return
+    content = (
+        "このプロジェクトのための UCF.md (プロジェクト指示ファイル) を作成してください。\n"
+        "プロジェクト構造を分析し、以下を含む UCF.md を write_file で書いてください:\n"
+        "- プロジェクトの概要\n- 主要な技術スタック\n- コーディング規約・パターン\n"
+        "- よく使うコマンド\n- 重要なファイルパス\n"
+    )
+    messages.append({"role": "user", "content": content})
+    try:
+        chat(client, messages, config, permission_mode=state.get("permission_mode", "ask"))
+    except KeyboardInterrupt:
+        print(_yellow("\n  中断しました。"))
+    except Exception as e:
+        print(f"\n{_red('[API error]')} {e}")
+        messages.pop()
+
+
+@slash_command("commit", "git の変更をコミット (メッセージ自動生成)")
+def cmd_commit(messages: list, client: OpenAI, config: dict, state: dict, args: str = "", **_) -> None:
+    content = (
+        "現在の git の変更内容を確認し、適切なコミットメッセージを生成してコミットしてください。\n"
+        "手順:\n"
+        "1. `git status` と `git diff` で変更内容を確認\n"
+        "2. 変更内容に基づいた簡潔なコミットメッセージを生成\n"
+        "3. `git add` で関連ファイルをステージング\n"
+        "4. `git commit -m 'メッセージ'` を実行\n"
+        "コミットメッセージは conventional commits 形式 (feat:, fix:, docs: 等) で。\n"
+    )
+    if args:
+        content += f"\n追加指示: {args}"
+    messages.append({"role": "user", "content": content})
+    try:
+        chat(client, messages, config, permission_mode=state.get("permission_mode", "ask"))
+    except KeyboardInterrupt:
+        print(_yellow("\n  中断しました。"))
+    except Exception as e:
+        print(f"\n{_red('[API error]')} {e}")
+        messages.pop()
+
+
+@slash_command("review", "現在の変更のコードレビュー")
+def cmd_review(messages: list, client: OpenAI, config: dict, state: dict, args: str = "", **_) -> None:
+    content = (
+        "現在の git の変更内容をコードレビューしてください。\n"
+        "手順:\n"
+        "1. `git diff` で変更内容を確認（ステージング済みの場合は `git diff --cached` も確認）\n"
+        "2. 以下の観点でレビュー:\n"
+        "   - バグや論理エラー\n"
+        "   - セキュリティ上の懸念\n"
+        "   - パフォーマンス問題\n"
+        "   - コードスタイル・可読性\n"
+        "3. 問題点があれば具体的な改善案を提示\n"
+    )
+    if args:
+        content += f"\n追加の確認ポイント: {args}"
+    messages.append({"role": "user", "content": content})
+    try:
+        chat(client, messages, config, permission_mode=state.get("permission_mode", "ask"))
     except KeyboardInterrupt:
         print(_yellow("\n  中断しました。"))
     except Exception as e:
@@ -2309,7 +2489,7 @@ def gui_main():
     # disabled_skills は set で管理し、config にも保持（ツール側から参照）
     disabled_skills: set[str] = set(config.get("disabled_skills", []))
     config["_disabled_skills"] = disabled_skills
-    state = {"auto_confirm": config.get("auto_confirm", False)}
+    state = {"permission_mode": config.get("permission_mode", "ask")}
 
     # スキルのスキャン
     _skill_registry.scan()
@@ -2351,6 +2531,7 @@ def gui_main():
         "cwd": os.getcwd(),
         "os": platform.system(),
         "has_context": bool(project_context),
+        "permission_mode": state.get("permission_mode", "ask"),
         "disabled_skills": list(disabled_skills),
         "skills": [
             _skill_registry.skill_to_dict(s)
@@ -2383,6 +2564,40 @@ def gui_main():
             if _chat_in_progress.is_set():
                 _emit({"type": "error", "message": "処理中です。完了をお待ちください。"})
                 continue
+
+            # GUI からのスラッシュコマンド対応
+            if content.startswith("/"):
+                slash_parts = content[1:].split(None, 1)
+                slash_cmd = slash_parts[0].lower()
+                slash_args = slash_parts[1] if len(slash_parts) > 1 else ""
+                if slash_cmd in SLASH_COMMANDS:
+                    conv_state["has_content"] = True
+                    _chat_in_progress.set()
+
+                    def _run_slash(cmd=slash_cmd, cmd_args=slash_args):
+                        try:
+                            SLASH_COMMANDS[cmd]["fn"](
+                                client=client, messages=messages, config=config,
+                                state=state, args=cmd_args,
+                            )
+                        except Exception as e:
+                            _emit({"type": "error", "message": str(e)})
+                        finally:
+                            _chat_in_progress.clear()
+                            if conv_state["has_content"]:
+                                try:
+                                    _save_conversation(
+                                        conv_state["id"], conv_state["title"],
+                                        messages, conv_state["created_at"]
+                                    )
+                                except Exception:
+                                    pass
+                            _emit({"type": "chat_finished",
+                                   "conversation_id": conv_state["id"]})
+
+                    t = threading.Thread(target=_run_slash, daemon=True)
+                    t.start()
+                    continue
 
             # 会話タイトル自動設定 (初回ユーザーメッセージから)
             if not conv_state["title"]:
@@ -2432,7 +2647,7 @@ def gui_main():
             def _run_chat(msgs=messages_ref):
                 try:
                     chat(client, msgs, config,
-                         auto_confirm=state.get("auto_confirm", False))
+                         permission_mode=state.get("permission_mode", "ask"))
                 except Exception as e:
                     _emit({"type": "error", "message": str(e)})
                     if msgs and msgs[-1].get("role") == "user":
@@ -2463,9 +2678,14 @@ def gui_main():
                 messages.append(system_msg)
                 _emit({"type": "status", "message": "会話履歴をクリアしました"})
             elif cmd_name == "autoconfirm":
-                state["auto_confirm"] = not state.get("auto_confirm", False)
-                _emit({"type": "status",
-                       "message": f"自動確認: {'ON' if state['auto_confirm'] else 'OFF'}"})
+                current = state.get("permission_mode", "ask")
+                idx = _PERMISSION_MODES.index(current) if current in _PERMISSION_MODES else 0
+                new_mode = _PERMISSION_MODES[(idx + 1) % len(_PERMISSION_MODES)]
+                state["permission_mode"] = new_mode
+                config["permission_mode"] = new_mode
+                _emit({"type": "permission_mode",
+                       "mode": new_mode,
+                       "label": _PERMISSION_LABELS[new_mode]})
             elif cmd_name == "model" and cmd_args:
                 config["model"] = cmd_args
                 _emit({"type": "status", "message": f"モデル変更: {cmd_args}"})
@@ -2538,7 +2758,7 @@ def gui_main():
                         def _run_skill_chat(msgs=messages):
                             try:
                                 chat(client, msgs, config,
-                                     auto_confirm=state.get("auto_confirm", False))
+                                     permission_mode=state.get("permission_mode", "ask"))
                             except Exception as e:
                                 _emit({"type": "error", "message": str(e)})
                             finally:
@@ -2731,7 +2951,7 @@ def main():
     config = _load_config()
     _ACTIVE_CONFIG = config
 
-    state = {"auto_confirm": config.get("auto_confirm", False)}
+    state = {"permission_mode": config.get("permission_mode", "ask")}
 
     # スキルのスキャン
     _skill_registry.scan()
@@ -2814,7 +3034,7 @@ def main():
                 client,
                 messages,
                 config,
-                auto_confirm=state.get("auto_confirm", False),
+                permission_mode=state.get("permission_mode", "ask"),
             )
         except KeyboardInterrupt:
             print(_yellow("\n  中断しました。"))

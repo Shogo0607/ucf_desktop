@@ -925,6 +925,70 @@ body {
   color: var(--text-secondary);
 }
 
+/* ── TodoWrite card ────────────────────────────────────────── */
+.todo-card {
+  background: var(--bg-tool-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: 8px 0;
+  max-width: 85%;
+  font-size: 12px;
+}
+.todo-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.todo-card-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.todo-card-count {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.todo-progress-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.todo-progress-fill {
+  height: 100%;
+  background: var(--accent-green);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  color: var(--text-secondary);
+}
+.todo-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+.todo-text {
+  flex: 1;
+  min-width: 0;
+}
+.todo-status-pending .todo-icon { color: var(--text-dim); }
+.todo-status-in_progress .todo-icon { color: var(--accent-blue); }
+.todo-status-in_progress .todo-text { color: var(--accent-blue); }
+.todo-status-completed .todo-icon { color: var(--accent-green); }
+.todo-status-completed .todo-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+
 /* ── Web mode ──────────────────────────────────────────── */
 body.web-mode #sidebar {
   padding-top: 16px;

@@ -415,6 +415,9 @@ window.agent.onMessage(function(msg) {
         renderConversationList(msg.conversations);
       }
       enableInput();
+      if (msg.permission_mode) {
+        updatePermissionButton(msg.permission_mode);
+      }
       if (msg.has_context) {
         appendStatusMessage('プロジェクトコンテキスト読み込み済み', true);
         setTimeout(removeEphemeralStatus, 3000);
@@ -503,6 +506,14 @@ window.agent.onMessage(function(msg) {
 
     case 'pdf_progress':
       handlePdfProgress(msg);
+      break;
+
+    case 'todo_update':
+      renderTodoList(msg.todos);
+      break;
+
+    case 'permission_mode':
+      updatePermissionButton(msg.mode);
       break;
 
     case 'error':
@@ -631,6 +642,18 @@ function renderRagFolders() {
   });
 }
 
+// ── Permission mode ──────────────────────────────────────────────
+
+var permissionLabels = {ask: '常に確認', auto_read: '読取自動', auto_all: '全自動'};
+var permissionColors = {ask: 'var(--accent-green)', auto_read: 'var(--accent-yellow)', auto_all: 'var(--accent-red)'};
+var currentPermission = 'ask';
+
+function updatePermissionButton(mode) {
+  currentPermission = mode;
+  btnAutoconf.textContent = '権限: ' + (permissionLabels[mode] || mode);
+  btnAutoconf.style.color = permissionColors[mode] || 'var(--text-secondary)';
+}
+
 // ── Sidebar buttons ────────────────────────────────────────────
 
 btnNewConv.addEventListener('click', function() {
@@ -641,10 +664,6 @@ btnNewConv.addEventListener('click', function() {
 });
 
 btnAutoconf.addEventListener('click', function() {
-  globalState.autoConfirm = !globalState.autoConfirm;
-  btnAutoconf.textContent = '自動確認: ' + (globalState.autoConfirm ? 'ON' : 'OFF');
-  btnAutoconf.style.color = globalState.autoConfirm
-    ? 'var(--accent-red)' : 'var(--text-secondary)';
   window.agent.sendCommand('autoconfirm');
 });
 
@@ -758,6 +777,47 @@ function handlePdfProgress(msg) {
 
   var pct = Math.min(Math.max(msg.percent || 0, 0), 100);
   bar.style.width = pct + '%';
+}
+
+// ── TodoWrite ────────────────────────────────────────────────────
+
+function renderTodoList(todos) {
+  var conv = getBackendConv();
+  if (!conv) return;
+
+  // 既存のカードがあれば更新、なければ新規作成
+  var card = conv.el.querySelector('.todo-card');
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'todo-card';
+    conv.el.appendChild(card);
+  }
+
+  var completed = todos.filter(function(t) { return t.status === 'completed'; }).length;
+  var total = todos.length;
+  var pct = total > 0 ? Math.round(completed / total * 100) : 0;
+
+  var html =
+    '<div class="todo-card-header">' +
+      '<span class="todo-card-title">&#9744; タスク</span>' +
+      '<span class="todo-card-count">' + completed + '/' + total + '</span>' +
+    '</div>' +
+    '<div class="todo-progress-bar"><div class="todo-progress-fill" style="width:' + pct + '%"></div></div>';
+
+  todos.forEach(function(t) {
+    var statusClass = 'todo-status-' + t.status;
+    var icon = t.status === 'completed' ? '\u2713'
+      : t.status === 'in_progress' ? '\u25C9'
+      : '\u25CB';
+    html +=
+      '<div class="todo-item ' + statusClass + '">' +
+        '<span class="todo-icon">' + icon + '</span>' +
+        '<span class="todo-text">' + escHtml(t.status === 'in_progress' ? t.activeForm : t.content) + '</span>' +
+      '</div>';
+  });
+
+  card.innerHTML = html;
+  scrollToBottomIfActive();
 }
 
 // ── Utilities ──────────────────────────────────────────────────
