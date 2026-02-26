@@ -24,6 +24,7 @@ def _pil_image_to_data_url(image: Image.Image) -> str:
 def _image_to_markdown(client: OpenAI, model: str, data_url: str, page_number: int) -> str:
     """Vision API で画像を Markdown に変換する。"""
     instruction = f"Page {page_number:03}: {loader.get_prompt('PDF_EXTRACTION_PAGE_INSTRUCTIONS')}"
+    token_param = "max_completion_tokens" if model.startswith(("gpt-5", "o1", "o3", "o4")) else "max_tokens"
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -33,7 +34,7 @@ def _image_to_markdown(client: OpenAI, model: str, data_url: str, page_number: i
                 {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
             ]},
         ],
-        max_tokens=4096,
+        **{token_param: 4096},
         timeout=60,
     )
     return response.choices[0].message.content or ""

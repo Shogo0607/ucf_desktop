@@ -1431,8 +1431,10 @@ def _compact_messages(client: OpenAI, messages: list, config: dict) -> list:
     summary_text = "\n".join(summary_parts)
 
     try:
+        summary_model = config.get("model", "gpt-4.1-mini")
+        token_param = "max_completion_tokens" if summary_model.startswith(("gpt-5", "o1", "o3", "o4")) else "max_tokens"
         resp = client.chat.completions.create(
-            model=config.get("model", "gpt-4.1-mini"),
+            model=summary_model,
             messages=[
                 {
                     "role": "system",
@@ -1440,7 +1442,7 @@ def _compact_messages(client: OpenAI, messages: list, config: dict) -> list:
                 },
                 {"role": "user", "content": summary_text},
             ],
-            max_tokens=500,
+            **{token_param: 500},
         )
         summary = resp.choices[0].message.content or "(要約なし)"
     except Exception:
