@@ -3,7 +3,7 @@
 Claude Code / OpenAI Codex 風のローカル AI コーディングアシスタント。
 自然言語でファイル操作・コマンド実行・コードレビューなどを行えます。
 
-CLI (ターミナル) と GUI (Electron デスクトップアプリ) の両方で動作します。
+CLI (ターミナル)、GUI (Electron デスクトップアプリ)、Web (ブラウザ) の 3 モードで動作します。
 
 ---
 
@@ -86,7 +86,7 @@ uv run python agent.py
   OS: Darwin | CWD: /Users/you/project
   Model: gpt-4.1-mini
   ✓ プロジェクトコンテキスト読み込み済み
-  ✓ スキル: 2 個読み込み済み (/skills で一覧)
+  ✓ スキル: 4 個読み込み済み (/skills で一覧)
   /help でコマンド一覧 | quit で終了
 ============================================================
 
@@ -111,23 +111,51 @@ npm start
 
 Electron ウィンドウが開き、チャット画面が表示されます。
 
-#### GUI の機能
+### Web モード (ブラウザ)
+
+```bash
+uv run python agent.py --web
+```
+
+デフォルトで `http://127.0.0.1:8765` にサーバーが起動します。ブラウザでアクセスして GUI と同じ画面が使えます。
+
+```bash
+# ポートやホストを変更する場合
+uv run python agent.py --web --port 3000 --host 0.0.0.0
+```
+
+> Web モードでは `web_server.py` が `agent.py --gui` をサブプロセスとして起動し、WebSocket でブラウザと通信します。
+> GUI の `renderer.js` は Electron IPC と WebSocket のどちらでも動作するように設計されており、同一の UI が使われます。
+
+#### ビルド (配布用パッケージ)
+
+```bash
+cd desktop
+npm run build:mac   # macOS DMG
+npm run build:win   # Windows NSIS インストーラー
+```
+
+#### GUI / Web の機能
 
 | 要素 | 説明 |
 |---|---|
 | **チャットエリア** | ストリーミング応答、ツール実行カード、確認ダイアログを表示 |
-| **会話クリア** | 会話履歴を全削除 |
+| **会話履歴サイドバー** | 過去の会話一覧を表示。新しい会話の作成、会話の切り替え・名前変更・削除が可能 |
 | **自動確認** | 破壊的操作 (ファイル編集、コマンド実行) の自動承認を切り替え |
 | **スキル一覧** | サイドバーにスキルを表示。クリックで実行 |
 | **スキルのオン/オフ** | 各スキルのトグルスイッチで有効・無効を切り替え。無効にしたスキルは LLM からも見えなくなる |
 | **スキル再読み込み** | ↻ ボタンでディスクからスキルを再スキャン |
+| **RAG フォルダ選択** | 入力欄の `+` ボタンで RAG 対象フォルダを追加できる |
+| **PDF 分析プログレス** | 起動時の PDF 自動分析の進捗をプログレスバーで表示 |
 | **ステータスバー** | 使用中モデル、カレントディレクトリ、接続状態を表示 |
 
 #### 自動会話圧縮
 
-GUI モードでは、会話のトークン数がコンテキストウィンドウの上限 (デフォルト 128,000 tokens) の 80% を超えると、チャット送信前に **自動で会話を圧縮** します。圧縮中はスピナーが表示され、完了後に圧縮前後のトークン数が通知されます。
+会話のトークン数がコンテキストウィンドウの上限の 80% を超えると、チャット送信前に **自動で会話を圧縮** します。圧縮中はスピナーが表示され、完了後に圧縮前後のトークン数が通知されます。
 
-> 閾値は設定 `context_limit` と `auto_compact_ratio` で調整可能です。
+#### PDF 自動分析
+
+起動時に `database/` ディレクトリ内の未処理 PDF をバックグラウンドで自動分析します。PDF の各ページを Vision API で画像→Markdown に変換し、さらに JSON サマリーを生成します。分析済みの PDF は `_analyzed.pdf` にリネームされます。
 
 ---
 
@@ -246,18 +274,18 @@ description: このスキルが何をするかの簡潔な説明
 > /skill word-skill テスト文書を作成して
 ```
 
-**3. サイドバーからクリック (GUI)**
+**3. サイドバーからクリック (GUI / Web)**
 
-GUI のサイドバーにスキル一覧が表示されます。クリックするとそのスキルが実行されます。
+サイドバーにスキル一覧が表示されます。クリックするとそのスキルが実行されます。
 ↻ ボタンでスキルの再読み込みができます。
 
-### スキルのオン/オフ (GUI)
+### スキルのオン/オフ (GUI / Web)
 
-GUI サイドバーの各スキルにはトグルスイッチがあります。
+サイドバーの各スキルにはトグルスイッチがあります。
 
 - **オフ**にすると、そのスキルはシステムプロンプトから除外され、LLM からは見えなくなります
 - サイドバーからのクリック実行もブロックされます
-- 設定は `~/.ucf_desktop/config.json` に永続化されます
+- 設定は `.ucf_desktop/config.json` に永続化されます
 
 ### スキルの自動検出
 
@@ -269,6 +297,35 @@ GUI サイドバーの各スキルにはトグルスイッチがあります。
 |---|---|
 | `skill-creator` | 会話を通じた対話的スキル作成。テンプレート生成 (`init_skill.py`) とバリデーション (`validate_skill.py`) のスクリプト付き |
 | `word-skill` | Word (docx) ファイルの読み書き。`python-docx` ラッパースクリプト付き |
+| `rag` | ReAct 方式で `database/` 内の全ファイル (JSON, Markdown, CSV, テキスト) を横断検索し回答を生成。`search_json.py` (全文検索) と `list_tree.py` (ディレクトリツリー) のスクリプト付き |
+| `P1` | 重大違反ゼロ (罰金・行政指導) の KPI 確認。xlsb ファイルからデータを読み込み状況を報告 |
+
+---
+
+## REST API
+
+Web モード (`--web`) 起動時に利用可能な REST API エンドポイントです。
+
+| メソッド | パス | 説明 |
+|---|---|---|
+| `POST` | `/api/query` | クエリを実行 (JSON レスポンスまたは SSE ストリーミング) |
+| `GET` | `/api/skills` | スキル一覧を取得 |
+| `GET` | `/api/health` | ヘルスチェック (モデル名, CWD, API キー状態) |
+
+**POST /api/query リクエスト例:**
+
+```json
+{
+  "query": "このプロジェクトの構造を教えて",
+  "skill": "rag",
+  "stream": false,
+  "auto_confirm": true,
+  "config": { "model": "gpt-4.1", "timeout": 60 }
+}
+```
+
+- `stream: true` の場合、`text/event-stream` (SSE) でストリーミング応答を返します
+- `stream: false` (デフォルト) の場合、完了後に JSON で一括返却します
 
 ---
 
@@ -279,38 +336,38 @@ LLM が使えるツールの一覧です。ユーザーが直接呼ぶもので�
 | ツール | 確認 | 説明 |
 |---|---|---|
 | `run_command` | あり | シェルコマンドを実行 |
-| `read_file` | なし | ファイルの内容を読み込む |
+| `read_file` | なし | ファイルの内容を行番号付きで読み込む (2000行ずつページング) |
 | `write_file` | あり | ファイルを書き込む (全体置換) |
-| `edit_file` | あり | ファイルの一部を置換編集 |
+| `edit_file` | あり | ファイルの一部を置換編集 (diff 表示付き) |
 | `list_directory` | なし | ディレクトリ内のファイル一覧を取得 |
 | `search_files` | なし | glob パターンでファイルを検索 |
 | `grep` | なし | 正規表現でファイル内容を検索 |
 | `get_file_info` | なし | ファイルのメタ情報を取得 |
-| `run_python_sandbox` | なし | Python コードをサンドボックスで安全に実行 |
 | `run_skill` | なし | 登録済みスキルを実行 |
+| `think` | なし | 推論・思考ステップを記録 (ReAct パターン用) |
 
-- 「確認あり」のツールは実行前にユーザーの承認を求めます
-- `/autoconfirm` (CLI) または「自動確認」ボタン (GUI) で自動承認に切り替え可能
+- 「確認あり」のツールは実行前にユーザーの承認を求めます (diff プレビュー付き)
+- `/autoconfirm` (CLI) または「自動確認」ボタン (GUI / Web) で自動承認に切り替え可能
+- `run_command` でもスキルスクリプト (`uv run python skills/...`, `uv run python pdf/...`) は確認なしで実行されます
 - 安全なツール (read_file, list_directory 等) は並列実行されます (最大 4 ワーカー)
 
 ---
 
 ## 設定
 
-設定ファイルは `~/.ucf_desktop/config.json` に保存されます。
+設定ファイルはプロジェクトルートの `.ucf_desktop/config.json` に保存されます。
 
 | キー | デフォルト | 説明 |
 |---|---|---|
 | `model` | `gpt-4.1-mini` | 使用する LLM モデル |
-| `timeout` | `30` | シェルコマンドのタイムアウト (秒) |
+| `timeout` | `120` | シェルコマンドのタイムアウト (秒) |
 | `auto_confirm` | `false` | 破壊的操作の自動承認 |
 | `max_context_messages` | `200` | 会話履歴の最大メッセージ数 |
 | `compact_keep_recent` | `10` | 圧縮時に保持する直近メッセージ数 |
 | `auto_context` | `true` | 起動時にプロジェクト構造を自動収集 |
 | `auto_context_max_files` | `50` | 自動収集するファイル数の上限 |
-| `context_limit` | `128000` | コンテキストウィンドウの上限トークン数 |
-| `auto_compact_ratio` | `0.8` | 自動圧縮を発動するトークン使用率 (0.0〜1.0) |
-| `disabled_skills` | `[]` | 無効化されたスキル名のリスト |
+
+GUI / Web からスキルを無効化した場合は `disabled_skills` (スキル名の配列) も保存されます。
 
 CLI で変更:
 
@@ -327,18 +384,39 @@ CLI で変更:
 ```
 ucf_desktop/
 ├── agent.py                 # Python バックエンド (エージェント本体)
+├── web_server.py            # Web モード用 WebSocket ブリッジ + REST API サーバー
 ├── pyproject.toml           # Python プロジェクト設定
 ├── .env                     # API キー (自分で作成, git 管理外)
+├── .ucf_desktop/            # プロジェクトローカル設定・会話履歴
+│   ├── config.json          # 設定ファイル
+│   └── conversations/       # 会話履歴 JSON ファイル
+├── pdf/                     # PDF 分析パイプライン
+│   ├── analyzer.py          # PDF 分析オーケストレーター
+│   ├── converter.py         # PDF → 画像変換 (pdfplumber)
+│   ├── document_processor.py # 画像 → Markdown → JSON (Vision API, 並列処理)
+│   └── file_manager.py      # PDF ファイル検出・出力管理
 ├── skills/                  # プロジェクトローカルスキル
 │   ├── skill-creator/       # スキル作成ガイド
 │   │   ├── SKILL.md
 │   │   └── scripts/
 │   │       ├── init_skill.py
 │   │       └── validate_skill.py
-│   └── word-skill/          # Word ファイル操作
+│   ├── word-skill/          # Word ファイル操作
+│   │   ├── SKILL.md
+│   │   └── scripts/
+│   │       └── word_skill.py
+│   ├── rag/                 # ReAct 方式 RAG 検索
+│   │   ├── SKILL.md
+│   │   ├── scripts/
+│   │   │   ├── search_json.py
+│   │   │   └── list_tree.py
+│   │   └── utils/
+│   │       └── prompt_loader.py
+│   └── P1/                  # KPI 確認 (重大違反ゼロ)
 │       ├── SKILL.md
 │       └── scripts/
-│           └── word_skill.py
+│           └── read_xlsb.py
+├── database/                # RAG 用データディレクトリ (PDF 分析結果等)
 └── desktop/                 # Electron デスクトップアプリ
     ├── main.js              # メインプロセス (Python 子プロセス管理)
     ├── preload.js           # IPC ブリッジ (セキュアな通信層)
@@ -346,7 +424,9 @@ ucf_desktop/
     └── renderer/
         ├── index.html       # UI レイアウト
         ├── renderer.js      # メッセージハンドリング・UI ロジック
-        └── styles.css       # ダークテーマ UI スタイル
+        ├── styles.css       # ダークテーマ UI スタイル
+        ├── web-agent.js     # WebSocket アダプター (Web モード用)
+        └── marked.umd.js    # Markdown レンダリングライブラリ
 ```
 
 ---
@@ -354,57 +434,75 @@ ucf_desktop/
 ## アーキテクチャ
 
 ```
-┌─────────────────────────────┐
-│   Electron GUI              │  renderer.js (HTML/CSS/JS)
-│   ├── チャット (ストリーミング) │
-│   ├── ツール実行カード         │
-│   ├── 確認ダイアログ           │
-│   ├── スキル一覧 + トグル      │
-│   └── 自動圧縮スピナー         │
-│   または CLI ターミナル         │
-└──────────┬──────────────────┘
-           │ JSON Lines (stdin/stdout)
-┌──────────▼──────────────────┐
-│   agent.py                  │  Python バックエンド
-│   ├── chat()                │  ストリーミング会話ループ
-│   ├── TOOLS[]               │  OpenAI function calling (並列実行)
-│   ├── SkillRegistry         │  スキル管理 (自動スキャン)
-│   ├── SlashCommands         │  ユーザーコマンド
-│   └── AutoCompact           │  コンテキスト自動圧縮
-└──────────┬──────────────────┘
-           │ HTTPS (streaming)
-┌──────────▼──────────────────┐
-│   OpenAI API                │  gpt-4.1-mini (デフォルト)
-│   (互換 API 対応)             │
-└─────────────────────────────┘
+┌─────────────────────────────────────┐
+│  Electron GUI / Web ブラウザ         │  renderer.js (HTML/CSS/JS)
+│  ├── チャット (ストリーミング)         │
+│  ├── ツール実行カード                 │
+│  ├── 確認ダイアログ (diff 付き)       │
+│  ├── 会話履歴サイドバー               │
+│  ├── スキル一覧 + トグル              │
+│  ├── RAG フォルダ選択                 │
+│  ├── PDF 分析プログレス               │
+│  └── 自動圧縮スピナー                 │
+│  または CLI ターミナル                 │
+└────────┬─────────────┬──────────────┘
+         │ Electron     │ Web モード
+         │ JSON Lines   │ WebSocket (/ws)
+         │ (stdin/stdout)│
+┌────────▼─────────────▼──────────────┐
+│  agent.py                           │  Python バックエンド
+│  ├── chat()                         │  ストリーミング会話ループ
+│  ├── TOOLS[]                        │  OpenAI function calling (並列実行)
+│  ├── SkillRegistry                  │  スキル管理 (自動スキャン)
+│  ├── ConversationStore              │  会話の永続化 (JSON ファイル)
+│  ├── SlashCommands                  │  ユーザーコマンド
+│  ├── AutoCompact                    │  コンテキスト自動圧縮
+│  └── PDF Analysis (daemon thread)   │  起動時 PDF 自動分析
+├─────────────────────────────────────┤
+│  web_server.py (Web モード時のみ)    │  aiohttp サーバー
+│  ├── WebSocket ブリッジ              │  agent subprocess ↔ ブラウザ
+│  ├── REST API (/api/query 等)       │  外部連携用エンドポイント
+│  └── 静的ファイル配信                 │  desktop/renderer/ を HTTP 配信
+└────────┬────────────────────────────┘
+         │ HTTPS (streaming)
+┌────────▼────────────────────────────┐
+│  OpenAI API                         │  gpt-4.1-mini (デフォルト)
+│  (互換 API 対応)                      │
+└─────────────────────────────────────┘
 ```
 
 ### IPC メッセージプロトコル
 
-Electron ↔ Python 間は JSON Lines で通信します。
+Electron ↔ Python 間は JSON Lines、Web モードでは WebSocket で通信します。
 
 **Renderer → Python:**
 
 | type | 説明 |
 |---|---|
-| `user_message` | ユーザーの入力テキスト |
+| `user_message` | ユーザーの入力テキスト (`rag_folders` フィールドで RAG 対象フォルダを指定可能) |
 | `confirm_response` | 確認ダイアログへの応答 (承認/拒否) |
-| `command` | GUI コマンド (clear, autoconfirm, toggle_skill, run_skill 等) |
+| `command` | GUI コマンド (autoconfirm, toggle_skill, run_skill, new_conversation, switch_conversation, delete_conversation, rename_conversation 等) |
 
 **Python → Renderer:**
 
 | type | 説明 |
 |---|---|
-| `system_info` | 起動時の初期情報 (モデル, CWD, スキル一覧) |
+| `system_info` | 起動時の初期情報 (モデル, CWD, スキル一覧, 会話一覧) |
 | `token` | ストリーミング応答の断片 |
 | `assistant_done` | アシスタントの応答完了 |
 | `tool_call` | ツール呼び出しの開始 |
 | `tool_result` | ツール実行結果 |
-| `confirm_request` | 破壊的操作の確認要求 |
+| `confirm_request` | 破壊的操作の確認要求 (diff プレビュー付き) |
 | `skills_list` | スキル一覧の更新 |
 | `skill_toggled` | スキルのオン/オフ状態変更 |
 | `compacting` | 自動圧縮開始 (スピナー表示) |
 | `compact_done` | 自動圧縮完了 (スピナー非表示) |
+| `pdf_progress` | PDF 分析の進捗情報 |
+| `conversation_new` | 新しい会話が作成された |
+| `conversation_switched` | 会話が切り替わった |
+| `conversation_deleted` | 会話が削除された |
+| `conversation_renamed` | 会話名が変更された |
+| `conversations_list` | 全会話のメタデータ一覧 |
 | `status` | ステータスメッセージ |
 | `error` | エラーメッセージ |
 | `chat_finished` | チャットスレッド完了 |
@@ -417,10 +515,15 @@ Electron ↔ Python 間は JSON Lines で通信します。
 |---|---|
 | `openai` | OpenAI API クライアント |
 | `python-dotenv` | `.env` ファイルの読み込み |
-| `openpyxl` | Excel (.xlsx) ファイル操作 |
-| `pandas` | データ処理・分析 |
+| `aiohttp` | Web モード用 非同期 HTTP / WebSocket サーバー |
+| `pdfplumber` | PDF → 画像変換 |
+| `pillow` | 画像処理 (PDF パイプライン) |
+| `pyyaml` | YAML フロントマター解析 (スキル読み込み) |
 | `python-docx` | Word (.docx) ファイル操作 |
+| `openpyxl` | Excel (.xlsx) ファイル操作 |
 | `pyxlsb` | Excel バイナリ (.xlsb) ファイル操作 |
+| `pandas` | データ処理・分析 |
+| `tqdm` | プログレスバー表示 |
 
 ---
 
