@@ -141,7 +141,8 @@ npm run build:win   # Windows NSIS インストーラー
 |---|---|
 | **チャットエリア** | ストリーミング応答、ツール実行カード、確認ダイアログを表示 |
 | **会話履歴サイドバー** | 過去の会話一覧を表示。新しい会話の作成、会話の切り替え・名前変更・削除が可能 |
-| **自動確認** | 破壊的操作 (ファイル編集、コマンド実行) の自動承認を切り替え |
+| **パーミッションモード** | 3 段階のパーミッションモード (`ask` / `auto_read` / `auto_all`) を切り替え |
+| **タスクリスト** | `todo_write` ツールで生成されたタスクの進捗をリアルタイム表示 |
 | **スキル一覧** | サイドバーにスキルを表示。クリックで実行 |
 | **スキルのオン/オフ** | 各スキルのトグルスイッチで有効・無効を切り替え。無効にしたスキルは LLM からも見えなくなる |
 | **スキル再読み込み** | ↻ ボタンでディスクからスキルを再スキャン |
@@ -149,13 +150,33 @@ npm run build:win   # Windows NSIS インストーラー
 | **PDF 分析プログレス** | 起動時の PDF 自動分析の進捗をプログレスバーで表示 |
 | **ステータスバー** | 使用中モデル、カレントディレクトリ、接続状態を表示 |
 
+#### パーミッションモード
+
+破壊的操作 (ファイル編集、コマンド実行) の確認動作を 3 段階で制御できます。
+
+| モード | 説明 |
+|---|---|
+| `ask` (デフォルト) | すべての破壊的操作で確認を求める |
+| `auto_read` | 読み取り系コマンド (`cat`, `head`, `ls` 等) は自動許可、それ以外は確認 |
+| `auto_all` | すべての操作を自動許可 (確認なし) |
+
+- CLI: `/permission` コマンドで切り替え (引数なしでトグル、`/permission auto_read` のように指定も可)
+- `/autoconfirm` は `/permission` のエイリアスです
+
 #### 自動会話圧縮
 
 会話のトークン数がコンテキストウィンドウの上限の 80% を超えると、チャット送信前に **自動で会話を圧縮** します。圧縮中はスピナーが表示され、完了後に圧縮前後のトークン数が通知されます。
 
 #### PDF 自動分析
 
-起動時に `database/` ディレクトリ内の未処理 PDF をバックグラウンドで自動分析します。PDF の各ページを Vision API で画像→Markdown に変換し、さらに JSON サマリーを生成します。分析済みの PDF は `_analyzed.pdf` にリネームされます。
+起動時に `database/` ディレクトリ内の未処理 PDF をバックグラウンドで自動分析します。
+
+1. PDF の各ページを Vision API で画像→Markdown に変換
+2. LLM でメタデータ (サマリー、トピック、キーワード、セクション見出し、ページ種別) を抽出
+3. `text-embedding-3-small` で各ページの embedding ベクトルを生成 (`*_embeddings.json`)
+4. 分析済みの PDF は `_analyzed.pdf` にリネーム
+
+既存の分析済み JSON にメタデータや embedding を後から追加したい場合は `pdf/migration.py` を使います。
 
 ---
 
@@ -170,13 +191,17 @@ CLI モードでは `/` で始まるコマンドが使えます。
 | `/compact` | 会話履歴を要約して圧縮 (トークン節約) |
 | `/history` | 会話履歴のサマリーを表示 |
 | `/tokens` | 現在のトークン使用量の概算を表示 |
-| `/autoconfirm` | 破壊的操作の自動確認モードを切り替え |
+| `/permission [mode]` | パーミッションモードを切り替え (`ask` / `auto_read` / `auto_all`) |
+| `/autoconfirm` | `/permission` のエイリアス |
 | `/model [name]` | 使用モデルを表示・変更 (例: `/model gpt-4.1`) |
 | `/config [key] [value]` | 設定の表示・変更 |
 | `/image <path> [質問]` | 画像を送信して質問する |
 | `/skills` | 利用可能なスキル一覧を表示 |
 | `/skills reload` | スキルを再読み込み |
 | `/skill <name> [args]` | スキルを直接実行 |
+| `/init` | プロジェクト指示ファイル (`UCF.md`) を自動生成 |
+| `/commit [指示]` | git の変更をコミット (メッセージ自動生成) |
+| `/review [観点]` | 現在の変更のコードレビュー |
 
 ---
 
@@ -297,7 +322,7 @@ description: このスキルが何をするかの簡潔な説明
 |---|---|
 | `skill-creator` | 会話を通じた対話的スキル作成。テンプレート生成 (`init_skill.py`) とバリデーション (`validate_skill.py`) のスクリプト付き |
 | `word-skill` | Word (docx) ファイルの読み書き。`python-docx` ラッパースクリプト付き |
-| `rag` | ReAct 方式で `database/` 内の全ファイル (JSON, Markdown, CSV, テキスト) を横断検索し回答を生成。`search_json.py` (全文検索) と `list_tree.py` (ディレクトリツリー) のスクリプト付き |
+| `rag` | ReAct 方式で `database/` 内の全ファイルを横断検索し回答を生成。ハイブリッド検索 (セマンティック + キーワード)、セマンティック検索、キーワード検索に対応。`search_json.py` と `list_tree.py` のスクリプト付き |
 | `P1` | 重大違反ゼロ (罰金・行政指導) の KPI 確認。xlsb ファイルからデータを読み込み状況を報告 |
 
 ---
@@ -345,9 +370,10 @@ LLM が使えるツールの一覧です。ユーザーが直接呼ぶもので�
 | `get_file_info` | なし | ファイルのメタ情報を取得 |
 | `run_skill` | なし | 登録済みスキルを実行 |
 | `think` | なし | 推論・思考ステップを記録 (ReAct パターン用) |
+| `todo_write` | なし | 構造化タスクリストの作成・更新 (進捗管理用) |
 
 - 「確認あり」のツールは実行前にユーザーの承認を求めます (diff プレビュー付き)
-- `/autoconfirm` (CLI) または「自動確認」ボタン (GUI / Web) で自動承認に切り替え可能
+- `/permission` (CLI) またはサイドバーのパーミッションボタン (GUI / Web) でモードを切り替え可能
 - `run_command` でもスキルスクリプト (`uv run python skills/...`, `uv run python pdf/...`) は確認なしで実行されます
 - 安全なツール (read_file, list_directory 等) は並列実行されます (最大 4 ワーカー)
 
@@ -361,13 +387,13 @@ LLM が使えるツールの一覧です。ユーザーが直接呼ぶもので�
 |---|---|---|
 | `model` | `gpt-4.1-mini` | 使用する LLM モデル |
 | `timeout` | `120` | シェルコマンドのタイムアウト (秒) |
-| `auto_confirm` | `false` | 破壊的操作の自動承認 |
+| `permission_mode` | `ask` | パーミッションモード (`ask` / `auto_read` / `auto_all`) |
 | `max_context_messages` | `200` | 会話履歴の最大メッセージ数 |
 | `compact_keep_recent` | `10` | 圧縮時に保持する直近メッセージ数 |
 | `auto_context` | `true` | 起動時にプロジェクト構造を自動収集 |
 | `auto_context_max_files` | `50` | 自動収集するファイル数の上限 |
 
-GUI / Web からスキルを無効化した場合は `disabled_skills` (スキル名の配列) も保存されます。
+GUI / Web からスキルを無効化した場合は `disabled_skills` (スキル名の配列) も保存されます。後方互換として、旧 `auto_confirm` 設定は起動時に `permission_mode` へ自動変換されます。
 
 CLI で変更:
 
@@ -391,10 +417,13 @@ ucf_desktop/
 │   ├── config.json          # 設定ファイル
 │   └── conversations/       # 会話履歴 JSON ファイル
 ├── pdf/                     # PDF 分析パイプライン
+│   ├── __init__.py
 │   ├── analyzer.py          # PDF 分析オーケストレーター
 │   ├── converter.py         # PDF → 画像変換 (pdfplumber)
-│   ├── document_processor.py # 画像 → Markdown → JSON (Vision API, 並列処理)
-│   └── file_manager.py      # PDF ファイル検出・出力管理
+│   ├── document_processor.py # 画像 → Markdown → メタデータ (Vision API, 並列処理)
+│   ├── embeddings.py        # embedding 生成・セマンティック検索 (text-embedding-3-small)
+│   ├── file_manager.py      # PDF ファイル検出・出力管理
+│   └── migration.py         # 既存 JSON へのメタデータ・embedding 後付け
 ├── skills/                  # プロジェクトローカルスキル
 │   ├── skill-creator/       # スキル作成ガイド
 │   │   ├── SKILL.md
@@ -441,6 +470,8 @@ ucf_desktop/
 │  ├── 確認ダイアログ (diff 付き)       │
 │  ├── 会話履歴サイドバー               │
 │  ├── スキル一覧 + トグル              │
+│  ├── パーミッションモード切替          │
+│  ├── タスクリスト (TodoWrite)          │
 │  ├── RAG フォルダ選択                 │
 │  ├── PDF 分析プログレス               │
 │  └── 自動圧縮スピナー                 │
@@ -456,8 +487,10 @@ ucf_desktop/
 │  ├── SkillRegistry                  │  スキル管理 (自動スキャン)
 │  ├── ConversationStore              │  会話の永続化 (JSON ファイル)
 │  ├── SlashCommands                  │  ユーザーコマンド
+│  ├── PermissionMode (3段階)          │  ask / auto_read / auto_all
+│  ├── TodoWrite                      │  タスクリスト管理
 │  ├── AutoCompact                    │  コンテキスト自動圧縮
-│  └── PDF Analysis (daemon thread)   │  起動時 PDF 自動分析
+│  └── PDF Analysis (daemon thread)   │  起動時 PDF 自動分析 + embedding 生成
 ├─────────────────────────────────────┤
 │  web_server.py (Web モード時のみ)    │  aiohttp サーバー
 │  ├── WebSocket ブリッジ              │  agent subprocess ↔ ブラウザ
@@ -487,7 +520,7 @@ Electron ↔ Python 間は JSON Lines、Web モードでは WebSocket で通信�
 
 | type | 説明 |
 |---|---|
-| `system_info` | 起動時の初期情報 (モデル, CWD, スキル一覧, 会話一覧) |
+| `system_info` | 起動時の初期情報 (モデル, CWD, スキル一覧, パーミッションモード, 会話一覧) |
 | `token` | ストリーミング応答の断片 |
 | `assistant_done` | アシスタントの応答完了 |
 | `tool_call` | ツール呼び出しの開始 |
@@ -495,6 +528,8 @@ Electron ↔ Python 間は JSON Lines、Web モードでは WebSocket で通信�
 | `confirm_request` | 破壊的操作の確認要求 (diff プレビュー付き) |
 | `skills_list` | スキル一覧の更新 |
 | `skill_toggled` | スキルのオン/オフ状態変更 |
+| `todo_update` | タスクリストの更新 |
+| `permission_mode` | パーミッションモードの変更通知 |
 | `compacting` | 自動圧縮開始 (スピナー表示) |
 | `compact_done` | 自動圧縮完了 (スピナー非表示) |
 | `pdf_progress` | PDF 分析の進捗情報 |
