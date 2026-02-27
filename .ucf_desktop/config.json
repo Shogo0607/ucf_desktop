@@ -2,9 +2,15 @@
   "model": "gpt-5.2",
   "embedding_model": "text-embedding-3-small",
   "timeout": 120,
-  "auto_confirm": false,
+  "permission_mode": "ask",
   "max_context_messages": 200,
   "compact_keep_recent": 10,
   "auto_context": true,
-  "auto_context_max_files": 50
+  "auto_context_max_files": 50,
+  "disabled_skills": [
+    "word-skill",
+    "rag",
+    "P1",
+    "skill-creator"
+  ]
 }

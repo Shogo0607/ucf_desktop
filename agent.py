@@ -1139,7 +1139,8 @@ def tool_grep(
         return f"[error] 正規表現エラー: {e}"
 
     results = []
-    max_results = 200
+    max_results = 50
+    max_line_chars = 200
 
     def _search_file(filepath: str) -> None:
         try:
@@ -1152,7 +1153,10 @@ def tool_grep(
                             rel = os.path.relpath(filepath, base)
                         except ValueError:
                             rel = filepath
-                        results.append(f"  {rel}:{i}: {line.rstrip()}")
+                        line_content = line.rstrip()
+                        if len(line_content) > max_line_chars:
+                            line_content = line_content[:max_line_chars] + "..."
+                        results.append(f"  {rel}:{i}: {line_content}")
         except (OSError, PermissionError):
             pass
 
@@ -1603,6 +1607,61 @@ def _build_image_message(path: str, user_text: str = "") -> Optional[dict]:
 # コンテキスト管理
 # ─────────────────────────────────────────────
 
+MAX_TOOL_RESULT_CHARS = 30000  # ツール結果1件あたりの最大文字数（≒7,500トークン）
+
+
+def _truncate_tool_result(result: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """ツール結果が長すぎる場合に行単位で切り詰める。"""
+    if len(result) <= max_chars:
+        return result
+    total = len(result)
+    # 行単位で切り詰め（途中で行が切れないように）
+    lines = result.split("\n")
+    truncated = []
+    current_len = 0
+    # 末尾に追加する注釈の長さを予約
+    suffix = f"\n\n[... 結果が長すぎるため切り詰めました (全体: {total}文字, 表示: {max_chars}文字)]"
+    budget = max_chars - len(suffix)
+    for line in lines:
+        if current_len + len(line) + 1 > budget:
+            break
+        truncated.append(line)
+        current_len += len(line) + 1
+    return "\n".join(truncated) + suffix
+
+
+def _shrink_tool_results(messages: list, context_limit: int, keep_recent: int = 6) -> list:
+    """
+    トークン数がcontext_limitに近づいた場合に、古いツール結果を段階的に圧縮する。
+    直近 keep_recent 件のメッセージはそのまま保持し、それ以前の tool メッセージを短縮する。
+    """
+    target = int(context_limit * 0.7)  # 70%まで削減を目指す
+
+    # Step 1: 古い tool メッセージ (keep_recent より前) を300文字に切り詰め
+    boundary = max(1, len(messages) - keep_recent)
+    for i in range(1, boundary):
+        m = messages[i]
+        if isinstance(m, dict) and m.get("role") == "tool":
+            content = m.get("content", "")
+            if len(content) > 300:
+                m["content"] = content[:300] + "\n[... 古い結果のため省略]"
+
+    if _estimate_tokens(messages) <= target:
+        return messages
+
+    # Step 2: まだ足りなければ、直近の tool メッセージも段階的に短縮
+    # 古いものから順に 3000 文字に切り詰め
+    for i in range(boundary, len(messages)):
+        m = messages[i]
+        if isinstance(m, dict) and m.get("role") == "tool":
+            content = m.get("content", "")
+            if len(content) > 3000:
+                m["content"] = content[:3000] + f"\n[... 結果を省略しました (元: {len(content)}文字)]"
+        if _estimate_tokens(messages) <= target:
+            break
+
+    return messages
+
 
 def _estimate_tokens(messages: list) -> int:
     """雑なトークン数推定（1 token ≒ 4文字）。"""
@@ -1704,12 +1763,33 @@ RETRY_BACKOFF = 2.0
 
 def _api_call_with_retry(client: OpenAI, **kwargs):
     last_err = None
+    _context_shrunk = False  # context_length_exceeded での縮小は1回だけ
     for attempt in range(MAX_RETRIES):
         try:
             return client.chat.completions.create(**kwargs)
         except Exception as e:
             last_err = e
             err_str = str(e).lower()
+
+            # context_length_exceeded: ツール結果を圧縮してリトライ（1回のみ）
+            if not _context_shrunk and (
+                "context_length" in err_str
+                or "maximum context length" in err_str
+                or "max_tokens" in err_str
+            ):
+                msgs = kwargs.get("messages")
+                if msgs:
+                    _context_shrunk = True
+                    before = _estimate_tokens(msgs)
+                    _shrink_tool_results(msgs, 128000)
+                    after = _estimate_tokens(msgs)
+                    msg = f"コンテキスト超過を検出。ツール結果を圧縮してリトライします ({before:,} → {after:,} tokens)"
+                    if _is_output_mode():
+                        _emit({"type": "status", "message": msg, "ephemeral": True})
+                    else:
+                        print(_dim(f"  ↻ {msg}"))
+                    continue
+
             retryable = any(
                 kw in err_str
                 for kw in ("rate limit", "429", "500", "502", "503", "timeout", "connection")
@@ -1795,6 +1875,12 @@ def chat(
     _last_think_msg = ""  # Track last think message for spinner
 
     while True:
+        # ── pre-flight: コンテキスト安全チェック ──
+        context_limit = config.get("context_limit", 128000)
+        est = _estimate_tokens(messages)
+        if est > int(context_limit * 0.9):
+            _shrink_tool_results(messages, context_limit)
+
         spinner_msg = f"💭 {_last_think_msg}" if _last_think_msg else "thinking..."
         spinner = Spinner(spinner_msg)
         spinner.start()
@@ -1918,7 +2004,7 @@ def chat(
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc_data["id"],
-                    "content": result,
+                    "content": _truncate_tool_result(result),
                 })
         else:
             # 単一ツールの場合
@@ -1964,7 +2050,7 @@ def chat(
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc_data["id"],
-                "content": result,
+                "content": _truncate_tool_result(result),
             })
 
 
