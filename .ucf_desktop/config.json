@@ -1,5 +1,6 @@
 {
   "model": "gpt-5.2",
+  "embedding_model": "text-embedding-3-small",
   "timeout": 120,
   "auto_confirm": false,
   "max_context_messages": 200,
