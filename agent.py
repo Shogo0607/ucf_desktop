@@ -179,6 +179,7 @@ _todo_list: list[dict] = []
 
 DEFAULT_CONFIG = {
     "model": "gpt-4.1-mini",
+    "embedding_model": "text-embedding-3-small",
     "timeout": 120,
     "permission_mode": "ask",  # "ask" | "auto_read" | "auto_all"
     "max_context_messages": 200,
@@ -1377,11 +1378,13 @@ def _run_pdf_analysis_background(client: OpenAI, config: dict):
     try:
         from pdf.analyzer import analyze_new_pdfs
         model = config.get("model", "gpt-4.1-mini")
+        emb_model = config.get("embedding_model", "text-embedding-3-small")
         analyze_new_pdfs(
             database_dir=database_dir,
             client=client,
             vision_model=model,
             summary_model=model,
+            embedding_model=emb_model,
             progress_callback=_pdf_progress if _is_output_mode() else None,
         )
     except Exception as e:

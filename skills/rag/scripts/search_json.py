@@ -48,6 +48,17 @@ load_dotenv(Path(_PROJECT_ROOT) / ".env")
 SUPPORTED_EXTENSIONS = {".json", ".md", ".csv", ".txt"}
 
 
+def _load_embedding_model() -> str:
+    """config.json から embedding_model を読み取る。"""
+    config_path = Path(_PROJECT_ROOT) / ".ucf_desktop" / "config.json"
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("embedding_model", "text-embedding-3-small")
+    except Exception:
+        return "text-embedding-3-small"
+
+
 def find_files(directory: str, extensions: set = None) -> list[Path]:
     """database/ 内のファイルを再帰的に検索する。"""
     if extensions is None:
@@ -405,7 +416,8 @@ def cmd_semantic_search(query: str, directory: str, top_k: int = 5):
     from pdf.embeddings import embed_query, semantic_search
 
     client = OpenAI()
-    query_embedding = embed_query(client, query)
+    emb_model = _load_embedding_model()
+    query_embedding = embed_query(client, query, model=emb_model)
 
     base = Path(directory)
     json_files = find_files(directory, {".json"})
@@ -464,6 +476,7 @@ def cmd_hybrid_search(query: str, directory: str, top_k: int = 5,
     from pdf.embeddings import embed_query, cosine_similarity
 
     client = OpenAI()
+    emb_model = _load_embedding_model()
 
     terms = query.lower().split()
     json_files = find_files(directory, {".json"})
@@ -481,7 +494,7 @@ def cmd_hybrid_search(query: str, directory: str, top_k: int = 5,
             page_scores[key]["keyword"] = r.get("score", 0.0)
 
     # 2. セマンティック検索
-    query_embedding = embed_query(client, query)
+    query_embedding = embed_query(client, query, model=emb_model)
     for f in json_files:
         emb_path = f.parent / f"{f.stem}_embeddings.json"
         if not emb_path.exists():

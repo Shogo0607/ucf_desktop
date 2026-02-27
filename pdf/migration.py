@@ -70,7 +70,7 @@ def migrate_metadata(json_path: Path, client: OpenAI, model: str = "gpt-4.1-mini
         sys.stderr.write(f"  Updated {json_path}\n")
 
 
-def migrate_embeddings(json_path: Path, client: OpenAI):
+def migrate_embeddings(json_path: Path, client: OpenAI, embedding_model: str = "text-embedding-3-small"):
     """既存JSONからembeddingを生成する。"""
     from pdf.embeddings import generate_embeddings
     from pdf.file_manager import save_embeddings
@@ -90,7 +90,7 @@ def migrate_embeddings(json_path: Path, client: OpenAI):
     sys.stderr.flush()
 
     try:
-        embeddings_data = generate_embeddings(client, data)
+        embeddings_data = generate_embeddings(client, data, model=embedding_model)
         save_embeddings(embeddings_data, emb_path)
         sys.stderr.write(f"  Saved: {emb_path}\n")
     except Exception as e:
@@ -107,7 +107,19 @@ def main():
                         help="embedding生成のみ実行")
     parser.add_argument("--model", default="gpt-4.1-mini",
                         help="メタデータ抽出用モデル (default: gpt-4.1-mini)")
+    parser.add_argument("--embedding-model", default=None,
+                        help="embeddingモデル (default: config.json の embedding_model)")
     args = parser.parse_args()
+
+    # embedding_model: CLI引数 > config.json > デフォルト
+    if args.embedding_model is None:
+        config_path = Path(__file__).resolve().parent.parent / ".ucf_desktop" / "config.json"
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            args.embedding_model = cfg.get("embedding_model", "text-embedding-3-small")
+        except Exception:
+            args.embedding_model = "text-embedding-3-small"
 
     client = OpenAI()
     base = Path(args.dir)
@@ -125,7 +137,7 @@ def main():
         if not args.embeddings_only:
             migrate_metadata(jf, client, args.model)
         if not args.metadata_only:
-            migrate_embeddings(jf, client)
+            migrate_embeddings(jf, client, embedding_model=args.embedding_model)
 
     sys.stderr.write("\nMigration complete.\n")
 

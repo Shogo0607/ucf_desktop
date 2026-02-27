@@ -21,6 +21,7 @@ def analyze_new_pdfs(
     client: OpenAI,
     vision_model: str = "gpt-4.1-mini",
     summary_model: str = "gpt-4.1-mini",
+    embedding_model: str = "text-embedding-3-small",
     progress_callback: Optional[Callable] = None,
 ):
     """
@@ -42,6 +43,7 @@ def analyze_new_pdfs(
     for file_idx, pdf_path in enumerate(pdf_files):
         _process_single_pdf(
             pdf_path, client, vision_model, summary_model,
+            embedding_model=embedding_model,
             progress_callback=progress_callback,
             file_index=file_idx,
             total_files=total_files,
@@ -57,6 +59,7 @@ def _process_single_pdf(
     client: OpenAI,
     vision_model: str,
     summary_model: str,
+    embedding_model: str = "text-embedding-3-small",
     progress_callback: Optional[Callable] = None,
     file_index: int = 0,
     total_files: int = 1,
@@ -129,7 +132,7 @@ def _process_single_pdf(
     # 5. Generate and save embeddings
     _notify("embedding", "埋め込み生成中...", 96)
     try:
-        embeddings_data = generate_embeddings(client, pages_json)
+        embeddings_data = generate_embeddings(client, pages_json, model=embedding_model)
         embeddings_path = output_dir / f"{pdf_path.stem}_embeddings.json"
         save_embeddings(embeddings_data, embeddings_path)
         _log(f"  Saved embeddings to {embeddings_path}")
