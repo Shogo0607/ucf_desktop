@@ -8,9 +8,8 @@
   "auto_context": true,
   "auto_context_max_files": 50,
   "disabled_skills": [
-    "word-skill",
     "rag",
     "P1",
-    "skill-creator"
+    "word-skill"
   ]
 }
